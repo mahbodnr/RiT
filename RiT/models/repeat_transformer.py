@@ -407,7 +407,7 @@ class RiTHalt(nn.Module):
 
 for model in ["tiny", "small", "base", "large", "huge"]:
     for patch_size in [4, 8, 16, 32]:
-        for image_size in [32, 64]:
+        for image_size in [32, 64, 224]:
             # RiT
             exec(f"""
 @register_model

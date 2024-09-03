@@ -3,10 +3,8 @@ from RiT.training import train
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument(
-    "--model-name",
-    type=str,
-)
+parser.add_argument("--model-name", type=str)
+parser.add_argument("--pretrained", action="store_true")
 # Logger
 parser.add_argument("--comet", action="store_true", dest="use_comet")
 parser.add_argument(

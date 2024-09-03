@@ -20,15 +20,15 @@ class Net(pl.LightningModule):
             ignore=[key for key in self.hparams.keys() if key[0] == "_"]
         )
         self.model = create_model(
-            # model_name= hparams.model_name,
-            # pretrained= False,
+            model_name= hparams.model_name,
+            pretrained= hparams.pretrained,
+            # TODO: add more arguments
             # pretrained_cfg = None,
             # pretrained_cfg_overlay = None,
             # checkpoint_path = '',
             # scriptable = None,
             # exportable = None,
             # no_jit = None,
-            **hparams.__dict__,
         )
         self.criterion = get_criterion(hparams)
         # CutMix and MixUp
