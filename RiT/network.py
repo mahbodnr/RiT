@@ -22,6 +22,9 @@ class Net(pl.LightningModule):
         self.model = create_model(
             model_name= hparams.model_name,
             pretrained= hparams.pretrained,
+            # model kwargs:
+            num_classes= hparams.num_classes,
+            dropout= hparams.dropout,
             # TODO: add more arguments
             # pretrained_cfg = None,
             # pretrained_cfg_overlay = None,
