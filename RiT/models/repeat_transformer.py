@@ -4,14 +4,12 @@ import math
 from timm.models.vision_transformer import Attention
 from timm.layers import PatchEmbed, Mlp, trunc_normal_
 from timm.models.registry import register_model
-from .config import DIMS, DEPTHS, HEADS
 
 from .vit import ViTBlock
 
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-
 
 class TimestepEmbedder(nn.Module):
     """
@@ -28,6 +26,7 @@ class TimestepEmbedder(nn.Module):
         self.frequency_embedding_size = frequency_embedding_size
 
     @staticmethod
+    @torch.compile
     def timestep_embedding(t, dim, max_period=10000):
         """
         Create sinusoidal timestep embeddings.
@@ -41,9 +40,9 @@ class TimestepEmbedder(nn.Module):
         half = dim // 2
         freqs = torch.exp(
             -math.log(max_period)
-            * torch.arange(start=0, end=half, dtype=torch.float32)
+            * torch.arange(start=0, end=half, device=t.device, dtype=t.dtype)
             / half
-        ).to(device=t.device)
+        )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
@@ -53,9 +52,7 @@ class TimestepEmbedder(nn.Module):
         return embedding
 
     def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size).type(
-            torch.get_default_dtype()
-        )
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq)
         return t_emb
 
@@ -123,6 +120,11 @@ class RiT(nn.Module):
         }, "pool type must be either cls (cls token) or mean (mean pooling)"
         self.pool = pool
 
+        self.timesteps = torch.nn.parameter.Parameter(
+            torch.arange(self.repeats).unsqueeze(1),
+            requires_grad=False,
+        )  # (T, B)
+
         self.patch_embed = PatchEmbed(
             img_size=image_size,
             patch_size=patch_size,
@@ -160,17 +162,12 @@ class RiT(nn.Module):
             x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = x + self.pos_embed
 
-        timesteps = (
-            torch.arange(self.repeats, device=x.device, dtype=x.dtype)
-            .unsqueeze(1)
-            .expand(self.repeats, x.shape[0])
-        )  # (T, B)
-
-        self.block_output = []
+        timesteps = self.timesteps.expand(self.repeats, x.shape[0])  # (T, B)
+        # self.block_output = []
         for t in timesteps:
             for block in self.blocks:
                 x = block(x, self.timestep_embedder(t))
-                self.block_output.append(x.clone().detach().cpu())
+                # self.block_output.append(x.clone().detach().cpu())
 
         x = self.norm(x)
 
@@ -318,6 +315,10 @@ class RiTHalt(nn.Module):
         assert (halt_threshold is None) or (0 <= halt_threshold <= 1), "halt_threshold must be in [0, 1]"
         self.halt_threshold = halt_threshold
 
+        self.timesteps = torch.nn.parameter.Parameter(
+            torch.arange(self.max_repeats).unsqueeze(1),
+            requires_grad=False,
+        )  # (T, B)       
         self.patch_embed = PatchEmbed(
             img_size=image_size,
             patch_size=patch_size,
@@ -361,35 +362,36 @@ class RiTHalt(nn.Module):
             x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = x + self.pos_embed
 
-        timesteps = (
-            torch.arange(self.max_repeats, device=x.device, dtype=x.dtype)
-            .unsqueeze(1)
-            .expand(self.max_repeats, x.shape[0])
-        )  # (T, B)
-
-
-        self.iterations = torch.zeros(x.shape[0], device=x.device)
-        halt_probs = torch.zeros(x.shape[0], 1, 1, device=x.device)
-        self.halt_probs_hist = [] # DELETE LATER
+        # self.iterations = x.new_zeros(x.shape[0])
+        halt_probs = x.new_zeros((x.shape[0], 1, 1))
+        halted = torch.zeros_like(halt_probs, dtype=torch.bool)
+        timesteps = self.timesteps.expand(self.max_repeats, x.shape[0])  # (T, B)
+        # self.halt_probs_hist = [] # DELETE LATER
+        all_halted = False
         for t in timesteps:
             for block in self.blocks:
-                prev_x = x.clone()
+                prev_x = x
 
                 if self.halt_threshold is None:
-                    update_mask = (halt_probs <= torch.rand_like(halt_probs)).squeeze(1).squeeze(1)
+                    update_mask = (halt_probs <= torch.rand_like(halt_probs)) & ~halted
+                    halt_probs[~update_mask] = 1
                 else:
-                    update_mask = (halt_probs <= self.halt_threshold).squeeze(1).squeeze(1)
+                    update_mask = (halt_probs <= self.halt_threshold)
                 
-                if not update_mask.any():
+                halted = halted | ~update_mask
+                all_halted = halted.all()
+                if all_halted:
                     break
-
+                
+                update_mask = update_mask.view(-1)
                 block_halt = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
                 x[update_mask], block_halt[update_mask] = block(x[update_mask], self.timestep_embedder(t[update_mask]))
-                x = x * (1-halt_probs) + prev_x * halt_probs
+                x[update_mask] = x[update_mask] * (1-halt_probs[update_mask]) + prev_x[update_mask] * halt_probs[update_mask]
                 halt_probs = halt_probs + (1-halt_probs) * block_halt.unsqueeze(1)
-                self.halt_probs_hist.append(halt_probs.clone().detach().cpu()) # DELETE LATER
-                self.iterations += update_mask
-            if not update_mask.any():
+
+                # self.halt_probs_hist.append(halt_probs.clone().detach().cpu()) # DELETE LATER
+                # self.iterations += update_mask
+            if all_halted:
                 break
 
         x = self.norm(x)
@@ -404,46 +406,2043 @@ class RiTHalt(nn.Module):
         x = self.head(x)
         return x
 
-
-for model in ["tiny", "small", "base", "large", "huge"]:
-    for patch_size in [4, 8, 16, 32]:
-        for image_size in [32, 64, 224]:
-            # RiT
-            exec(f"""
 @register_model
-def rith_d1_{model}_patch{patch_size}_{image_size}(pretrained= False, **kwargs):
+def rit_d1_tiny_patch4_32(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
-    return RiTHalt(
-        image_size={image_size},
-        patch_size={patch_size},
+    return RiT(
+        image_size=32,
+        patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
-        dim=DIMS["{model}"],
-        heads=HEADS["{model}"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch4_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch4_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch8_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch8_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch8_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch16_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch16_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch32_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch32_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_tiny_patch32_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=6,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch4_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch4_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch4_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch8_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch8_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch8_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch16_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch16_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch32_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch32_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_small_patch32_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch4_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch4_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch4_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch8_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch8_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch8_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch16_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch16_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch32_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch32_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_base_patch32_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=12,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch4_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch4_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch4_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch8_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch8_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch8_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch16_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch16_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch32_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch32_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_large_patch32_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=24,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch4_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch4_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch4_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch8_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch8_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch8_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch16_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch16_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch32_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=32,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch32_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=64,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rit_d1_huge_patch32_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiT(
+        image_size=224,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        mlp_ratio=4.0,
+        repeats=32,
+        dropout=0,
+    )
+
+@register_model
+def rith_d1_tiny_patch4_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=int(DEPTHS["{model}"] * 1.5),
-        dropout=kwargs["dropout"],
+        max_repeats=7,
+        dropout=0,
         halt_pool="cls",
     )
-""")
-            # RiTHalt
-            exec(f"""
+
 @register_model
-def rit_d1_{model}_patch{patch_size}_{image_size}(pretrained= False, **kwargs):
+def rith_d1_tiny_patch4_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
-    return RiT(
-        image_size={image_size},
-        patch_size={patch_size},
+    return RiTHalt(
+        image_size=64,
+        patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
-        dim=DIMS["{model}"],
-        heads=HEADS["{model}"],
+        dim=192,
+        heads=3,
         depth=1,
+        halt_threshold=None,
         mlp_ratio=4.0,
-        repeats=DEPTHS["{model}"],
-        dropout=kwargs["dropout"],
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
     )
-""")
-           
+
+@register_model
+def rith_d1_tiny_patch4_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_tiny_patch8_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_tiny_patch8_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_tiny_patch8_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_tiny_patch16_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_tiny_patch16_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_tiny_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_tiny_patch32_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_tiny_patch32_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_tiny_patch32_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=7,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch4_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch4_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch4_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch8_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch8_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch8_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch16_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch16_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch32_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch32_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_small_patch32_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch4_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch4_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch4_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch8_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch8_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch8_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch16_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch16_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch32_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch32_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_base_patch32_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=15,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch4_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch4_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch4_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch8_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch8_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch8_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch16_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch16_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch32_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch32_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_large_patch32_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1024,
+        heads=16,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=30,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch4_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch4_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch4_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch8_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch8_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch8_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=8,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch16_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch16_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch32_32(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=32,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch32_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d1_huge_patch32_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=32,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=1536,
+        heads=24,
+        depth=1,
+        halt_threshold=None,
+        mlp_ratio=4.0,
+        max_repeats=40,
+        dropout=0,
+        halt_pool="cls",
+    )
+

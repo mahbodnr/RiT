@@ -42,48 +42,48 @@ class ViT(nn.Module):
         patch_size=16,
         channels=3,
         num_classes=1000,
-        embed_dim=768,
+        dim=768,
         depth=12,
-        num_heads=12,
-        mlp_ratio=4.0,
+        heads=12,
+        mlp_dim=4.0,
         qkv_bias=True,
-        drop_rate=0.0,
+        dropout=0.0,
     ):
         super().__init__()
         self.num_classes = num_classes
-        self.num_features = self.embed_dim = embed_dim
+        self.num_features = self.embed_dim = dim
 
         self.patch_embed = PatchEmbed(
             img_size=image_size,
             patch_size=patch_size,
             in_chans=channels,
-            embed_dim=embed_dim,
+            embed_dim=dim,
         )
         num_patches = self.patch_embed.num_patches
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
-        self.pos_drop = nn.Dropout(p=drop_rate)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, dim))
+        self.pos_drop = nn.Dropout(p=dropout)
 
         dpr = [
-            x.item() for x in torch.linspace(0, drop_rate, depth)
+            x.item() for x in torch.linspace(0, dropout, depth)
         ]  # stochastic depth decay rule
         self.blocks = nn.ModuleList(
             [
                 ViTBlock(
-                    dim=embed_dim,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
+                    dim=dim,
+                    num_heads=heads,
+                    mlp_ratio=mlp_dim/dim,
                     qkv_bias=qkv_bias,
                     drop=dpr[i],
                 )
                 for i in range(depth)
             ]
         )
-        self.norm = nn.LayerNorm(embed_dim, eps=1e-6)
+        self.norm = nn.LayerNorm(dim, eps=1e-6)
 
         self.head = (
-            nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+            nn.Linear(dim, num_classes) if num_classes > 0 else nn.Identity()
         )
 
         trunc_normal_(self.pos_embed, std=0.02)

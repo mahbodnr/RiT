@@ -23,7 +23,7 @@ parser.add_argument(
 )
 parser.add_argument("--image-size", default=None, type=int, help="Input image size. If not set, it will be set based on the dataset's default size.")
 parser.add_argument("--data-root", default="~/data", type=str)
-parser.add_argument("--profile", action="store_true")
+parser.add_argument("--profiler", default=None, type=str, choices=["simple", "advanced", "pytorch"], help="Profiler to use. If not set, no profiling will be done.")
 parser.add_argument("--batch-size", default=128, type=int)
 parser.add_argument("--eval-batch-size", default=256, type=int)
 parser.add_argument("--accumulate-grad-batches", default=1, type=int, help="Accumulate gradients over N batches before doing a backward pass.")

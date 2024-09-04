@@ -22,16 +22,11 @@ class Net(pl.LightningModule):
         self.model = create_model(
             model_name= hparams.model_name,
             pretrained= hparams.pretrained,
-            # model kwargs:
             num_classes= hparams.num_classes,
-            dropout= hparams.dropout,
-            # TODO: add more arguments
+            # TODO: add pretrained arguments:
             # pretrained_cfg = None,
             # pretrained_cfg_overlay = None,
             # checkpoint_path = '',
-            # scriptable = None,
-            # exportable = None,
-            # no_jit = None,
         )
         self.criterion = get_criterion(hparams)
         # CutMix and MixUp
@@ -142,9 +137,9 @@ class Net(pl.LightningModule):
         self.log("train_loss", loss)
         self.log("train_acc", acc)
 
-        if isinstance(self.model, RiTHalt):
-            self.log("average iterations", self.model.iterations.mean().item())
-            self.log_histogram(self.model.iterations, "iterations", self.global_step)
+        # if isinstance(self.model, RiTHalt):
+        #     self.log("average iterations", self.model.iterations.mean().item())
+        #     self.log_histogram(self.model.iterations, "iterations", self.global_step)
 
         return {
             "loss": loss,

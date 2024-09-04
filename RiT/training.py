@@ -81,15 +81,22 @@ def train(args):
         monitor="val_loss",
         mode="min",
     )
-    if args.profile:
-        print("[INFO] Profiling!")
-        profiler = pl.profilers.PyTorchProfiler(
-            output_filename=f"logs/profile/{experiment_name}.txt",
-            # use_cuda=True,
-            profile_memory=True,
-            export_to_chrome=True,
-            use_cpu=False,
-        )
+    if args.profiler is not None:
+        if args.profiler == "pytorch":
+            profiler = pl.profilers.PyTorchProfiler(
+                output_filename=f"logs/profile/{experiment_name}.txt",
+                use_cuda=True,
+                # profile_memory=True,
+                export_to_chrome=True,
+                use_cpu=False,
+            )
+        elif args.profiler == "simple":
+            profiler = pl.profilers.SimpleProfiler()
+        elif args.profiler == "advanced":
+            profiler = pl.profilers.AdvancedProfiler()
+        else:
+            raise ValueError(f"Invalid profiler: {args.profiler}")
+        print(f"[INFO] Profiling with {args.profiler} profiler")
     else:
         profiler = None
     trainer = pl.Trainer(
