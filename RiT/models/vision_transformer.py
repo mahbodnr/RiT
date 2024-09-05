@@ -1,9 +1,7 @@
 from timm.models.registry import register_model
 # from .vit_pytorch.vit import ViT
 from .vit import ViT
-from .config import DIMS, DEPTHS, HEADS, MLP_DIMS
-       
-
+    
 @register_model
 def vit_tiny_patch4_32(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -13,13 +11,11 @@ def vit_tiny_patch4_32(pretrained= False, **kwargs):
         channels=3,
         num_classes=kwargs["num_classes"],
         dim=192,
-        depth=6,
+        depth=12,
         heads=3,
         mlp_dim=768,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_tiny_patch4_64(pretrained= False, **kwargs):
@@ -30,13 +26,11 @@ def vit_tiny_patch4_64(pretrained= False, **kwargs):
         channels=3,
         num_classes=kwargs["num_classes"],
         dim=192,
-        depth=6,
+        depth=12,
         heads=3,
         mlp_dim=768,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_tiny_patch8_32(pretrained= False, **kwargs):
@@ -47,13 +41,11 @@ def vit_tiny_patch8_32(pretrained= False, **kwargs):
         channels=3,
         num_classes=kwargs["num_classes"],
         dim=192,
-        depth=6,
+        depth=12,
         heads=3,
         mlp_dim=768,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_tiny_patch8_64(pretrained= False, **kwargs):
@@ -64,13 +56,11 @@ def vit_tiny_patch8_64(pretrained= False, **kwargs):
         channels=3,
         num_classes=kwargs["num_classes"],
         dim=192,
-        depth=6,
+        depth=12,
         heads=3,
         mlp_dim=768,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_tiny_patch16_32(pretrained= False, **kwargs):
@@ -81,13 +71,11 @@ def vit_tiny_patch16_32(pretrained= False, **kwargs):
         channels=3,
         num_classes=kwargs["num_classes"],
         dim=192,
-        depth=6,
+        depth=12,
         heads=3,
         mlp_dim=768,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_tiny_patch16_64(pretrained= False, **kwargs):
@@ -98,13 +86,11 @@ def vit_tiny_patch16_64(pretrained= False, **kwargs):
         channels=3,
         num_classes=kwargs["num_classes"],
         dim=192,
-        depth=6,
+        depth=12,
         heads=3,
         mlp_dim=768,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_tiny_patch32_32(pretrained= False, **kwargs):
@@ -115,13 +101,11 @@ def vit_tiny_patch32_32(pretrained= False, **kwargs):
         channels=3,
         num_classes=kwargs["num_classes"],
         dim=192,
-        depth=6,
+        depth=12,
         heads=3,
         mlp_dim=768,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_tiny_patch32_64(pretrained= False, **kwargs):
@@ -132,13 +116,11 @@ def vit_tiny_patch32_64(pretrained= False, **kwargs):
         channels=3,
         num_classes=kwargs["num_classes"],
         dim=192,
-        depth=6,
+        depth=12,
         heads=3,
         mlp_dim=768,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_small_patch4_32(pretrained= False, **kwargs):
@@ -155,8 +137,6 @@ def vit_small_patch4_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_small_patch4_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -171,8 +151,6 @@ def vit_small_patch4_64(pretrained= False, **kwargs):
         mlp_dim=1536,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_small_patch8_32(pretrained= False, **kwargs):
@@ -189,8 +167,6 @@ def vit_small_patch8_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_small_patch8_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -205,8 +181,6 @@ def vit_small_patch8_64(pretrained= False, **kwargs):
         mlp_dim=1536,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_small_patch16_32(pretrained= False, **kwargs):
@@ -223,8 +197,6 @@ def vit_small_patch16_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_small_patch16_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -239,8 +211,6 @@ def vit_small_patch16_64(pretrained= False, **kwargs):
         mlp_dim=1536,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_small_patch32_32(pretrained= False, **kwargs):
@@ -257,8 +227,6 @@ def vit_small_patch32_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_small_patch32_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -273,8 +241,6 @@ def vit_small_patch32_64(pretrained= False, **kwargs):
         mlp_dim=1536,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_base_patch4_32(pretrained= False, **kwargs):
@@ -291,8 +257,6 @@ def vit_base_patch4_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_base_patch4_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -307,8 +271,6 @@ def vit_base_patch4_64(pretrained= False, **kwargs):
         mlp_dim=3072,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_base_patch8_32(pretrained= False, **kwargs):
@@ -325,8 +287,6 @@ def vit_base_patch8_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_base_patch8_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -341,8 +301,6 @@ def vit_base_patch8_64(pretrained= False, **kwargs):
         mlp_dim=3072,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_base_patch16_32(pretrained= False, **kwargs):
@@ -359,8 +317,6 @@ def vit_base_patch16_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_base_patch16_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -375,8 +331,6 @@ def vit_base_patch16_64(pretrained= False, **kwargs):
         mlp_dim=3072,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_base_patch32_32(pretrained= False, **kwargs):
@@ -393,8 +347,6 @@ def vit_base_patch32_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_base_patch32_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -409,8 +361,6 @@ def vit_base_patch32_64(pretrained= False, **kwargs):
         mlp_dim=3072,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_large_patch4_32(pretrained= False, **kwargs):
@@ -427,8 +377,6 @@ def vit_large_patch4_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_large_patch4_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -443,8 +391,6 @@ def vit_large_patch4_64(pretrained= False, **kwargs):
         mlp_dim=4096,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_large_patch8_32(pretrained= False, **kwargs):
@@ -461,8 +407,6 @@ def vit_large_patch8_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_large_patch8_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -477,8 +421,6 @@ def vit_large_patch8_64(pretrained= False, **kwargs):
         mlp_dim=4096,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_large_patch16_32(pretrained= False, **kwargs):
@@ -495,8 +437,6 @@ def vit_large_patch16_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_large_patch16_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -511,8 +451,6 @@ def vit_large_patch16_64(pretrained= False, **kwargs):
         mlp_dim=4096,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_large_patch32_32(pretrained= False, **kwargs):
@@ -529,8 +467,6 @@ def vit_large_patch32_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_large_patch32_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -545,8 +481,6 @@ def vit_large_patch32_64(pretrained= False, **kwargs):
         mlp_dim=4096,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_huge_patch4_32(pretrained= False, **kwargs):
@@ -563,8 +497,6 @@ def vit_huge_patch4_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_huge_patch4_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -579,8 +511,6 @@ def vit_huge_patch4_64(pretrained= False, **kwargs):
         mlp_dim=6144,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_huge_patch8_32(pretrained= False, **kwargs):
@@ -597,8 +527,6 @@ def vit_huge_patch8_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_huge_patch8_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -613,8 +541,6 @@ def vit_huge_patch8_64(pretrained= False, **kwargs):
         mlp_dim=6144,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_huge_patch16_32(pretrained= False, **kwargs):
@@ -631,8 +557,6 @@ def vit_huge_patch16_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_huge_patch16_64(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -648,8 +572,6 @@ def vit_huge_patch16_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
-
-
 @register_model
 def vit_huge_patch32_32(pretrained= False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
@@ -664,8 +586,6 @@ def vit_huge_patch32_32(pretrained= False, **kwargs):
         mlp_dim=6144,
         dropout=0,
     )
-
-
 
 @register_model
 def vit_huge_patch32_64(pretrained= False, **kwargs):

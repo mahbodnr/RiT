@@ -15,6 +15,8 @@ from RiT.models.repeat_transformer import RiTHalt
 class Net(pl.LightningModule):
     def __init__(self, hparams):
         super(Net, self).__init__()
+        self._sample_input_data = hparams._sample_input_data
+        del hparams._sample_input_data
         self.hparams.update(vars(hparams))
         self.save_hyperparameters(
             ignore=[key for key in self.hparams.keys() if key[0] == "_"]
@@ -137,9 +139,9 @@ class Net(pl.LightningModule):
         self.log("train_loss", loss)
         self.log("train_acc", acc)
 
-        # if isinstance(self.model, RiTHalt):
-        #     self.log("average iterations", self.model.iterations.mean().item())
-        #     self.log_histogram(self.model.iterations, "iterations", self.global_step)
+        if isinstance(self.model, RiTHalt):
+            self.log("average iterations", self.model.iterations.mean().item())
+            self.log_histogram(self.model.iterations, "iterations", self.global_step)
 
         return {
             "loss": loss,
@@ -205,7 +207,7 @@ class Net(pl.LightningModule):
         print(summary)
         #### use torchsummary instead:
         # from torchsummary import summary
-        # summary(self.model, self.hparams._sample_input_data.shape[1:], device="cuda")
+        # summary(self.model, self._sample_input_data.shape[1:], device="cuda")
 
     def cutmix_mixup(self, img, label):
         if self.hparams.cutmix and self.hparams.mixup:
@@ -230,7 +232,7 @@ class Net(pl.LightningModule):
 
     def log_layer_outputs(self):
         # log the output of each layer
-        layer_outputs = get_layer_outputs(self.model, self.hparams._sample_input_data)
+        layer_outputs = get_layer_outputs(self.model, self._sample_input_data)
         for name, output in layer_outputs.items():
             self.log_histogram(output, name + ".output", self.global_step)
 

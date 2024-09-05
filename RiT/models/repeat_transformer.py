@@ -25,19 +25,17 @@ class TimestepEmbedder(nn.Module):
         )
         self.frequency_embedding_size = frequency_embedding_size
 
-    @staticmethod
     @torch.compile
-    def timestep_embedding(t, dim, max_period=10000):
+    def timestep_embedding(self, t, max_period=10000):
         """
         Create sinusoidal timestep embeddings.
         :param t: a 1-D Tensor of N indices, one per batch element.
                           These may be fractional.
-        :param dim: the dimension of the output.
         :param max_period: controls the minimum frequency of the embeddings.
         :return: an (N, D) Tensor of positional embeddings.
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
-        half = dim // 2
+        half = self.frequency_embedding_size  // 2
         freqs = torch.exp(
             -math.log(max_period)
             * torch.arange(start=0, end=half, device=t.device, dtype=t.dtype)
@@ -45,14 +43,14 @@ class TimestepEmbedder(nn.Module):
         )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
+        if self.frequency_embedding_size  % 2:
             embedding = torch.cat(
                 [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
             )
         return embedding
 
     def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        t_freq = self.timestep_embedding(t)
         t_emb = self.mlp(t_freq)
         return t_emb
 
@@ -180,7 +178,6 @@ class RiT(nn.Module):
 
         x = self.head(x)
         return x
-
 
 class SimpleRiT(RiT):
     def __init__(
@@ -362,37 +359,29 @@ class RiTHalt(nn.Module):
             x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = x + self.pos_embed
 
-        # self.iterations = x.new_zeros(x.shape[0])
         halt_probs = x.new_zeros((x.shape[0], 1, 1))
-        halted = torch.zeros_like(halt_probs, dtype=torch.bool)
-        timesteps = self.timesteps.expand(self.max_repeats, x.shape[0])  # (T, B)
+        self.iterations = torch.zeros_like(halt_probs)
         # self.halt_probs_hist = [] # DELETE LATER
-        all_halted = False
+        timesteps = self.timesteps.expand(self.max_repeats, x.shape[0])  # (T, B)
         for t in timesteps:
             for block in self.blocks:
                 prev_x = x
 
+                # Check for halting threshold
                 if self.halt_threshold is None:
-                    update_mask = (halt_probs <= torch.rand_like(halt_probs)) & ~halted
-                    halt_probs[~update_mask] = 1
+                    halt_probs[halt_probs > torch.rand_like(halt_probs)] = 1
                 else:
-                    update_mask = (halt_probs <= self.halt_threshold)
+                    halt_probs[halt_probs >= self.halt_threshold] = 1
                 
-                halted = halted | ~update_mask
-                all_halted = halted.all()
-                if all_halted:
-                    break
-                
-                update_mask = update_mask.view(-1)
-                block_halt = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
-                x[update_mask], block_halt[update_mask] = block(x[update_mask], self.timestep_embedder(t[update_mask]))
-                x[update_mask] = x[update_mask] * (1-halt_probs[update_mask]) + prev_x[update_mask] * halt_probs[update_mask]
+                # update x
+                x, block_halt = block(x, self.timestep_embedder(t))
+                x = torch.lerp(x, prev_x, halt_probs) # = x * (1-halt_probs) + prev_x * halt_probs
+                # update halt_probs
                 halt_probs = halt_probs + (1-halt_probs) * block_halt.unsqueeze(1)
+                # monitor halting probabilities
+                # self.halt_probs_hist.append(halt_probs.clone().detach()) # DELETE LATER
+                self.iterations += (halt_probs < 1) 
 
-                # self.halt_probs_hist.append(halt_probs.clone().detach().cpu()) # DELETE LATER
-                # self.iterations += update_mask
-            if all_halted:
-                break
 
         x = self.norm(x)
 
@@ -418,7 +407,7 @@ def rit_d1_tiny_patch4_32(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -434,7 +423,7 @@ def rit_d1_tiny_patch4_64(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -450,7 +439,7 @@ def rit_d1_tiny_patch4_224(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -466,7 +455,7 @@ def rit_d1_tiny_patch8_32(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -482,7 +471,7 @@ def rit_d1_tiny_patch8_64(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -498,7 +487,7 @@ def rit_d1_tiny_patch8_224(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -514,7 +503,7 @@ def rit_d1_tiny_patch16_32(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -530,7 +519,7 @@ def rit_d1_tiny_patch16_64(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -546,7 +535,7 @@ def rit_d1_tiny_patch16_224(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -562,7 +551,7 @@ def rit_d1_tiny_patch32_32(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -578,7 +567,7 @@ def rit_d1_tiny_patch32_64(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -594,7 +583,7 @@ def rit_d1_tiny_patch32_224(pretrained= False, **kwargs):
         heads=3,
         depth=1,
         mlp_ratio=4.0,
-        repeats=6,
+        repeats=12,
         dropout=0,
     )
 
@@ -1379,7 +1368,7 @@ def rith_d1_tiny_patch4_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1397,7 +1386,7 @@ def rith_d1_tiny_patch4_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1415,7 +1404,7 @@ def rith_d1_tiny_patch4_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1433,7 +1422,7 @@ def rith_d1_tiny_patch8_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1451,7 +1440,7 @@ def rith_d1_tiny_patch8_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1469,7 +1458,7 @@ def rith_d1_tiny_patch8_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1487,7 +1476,7 @@ def rith_d1_tiny_patch16_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1505,7 +1494,7 @@ def rith_d1_tiny_patch16_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1523,7 +1512,7 @@ def rith_d1_tiny_patch16_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1541,7 +1530,7 @@ def rith_d1_tiny_patch32_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1559,7 +1548,7 @@ def rith_d1_tiny_patch32_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1577,7 +1566,7 @@ def rith_d1_tiny_patch32_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=7,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1595,7 +1584,7 @@ def rith_d1_small_patch4_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1613,7 +1602,7 @@ def rith_d1_small_patch4_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1631,7 +1620,7 @@ def rith_d1_small_patch4_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1649,7 +1638,7 @@ def rith_d1_small_patch8_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1667,7 +1656,7 @@ def rith_d1_small_patch8_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1685,7 +1674,7 @@ def rith_d1_small_patch8_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1703,7 +1692,7 @@ def rith_d1_small_patch16_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1721,7 +1710,7 @@ def rith_d1_small_patch16_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1739,7 +1728,7 @@ def rith_d1_small_patch16_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1757,7 +1746,7 @@ def rith_d1_small_patch32_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1775,7 +1764,7 @@ def rith_d1_small_patch32_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1793,7 +1782,7 @@ def rith_d1_small_patch32_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1811,7 +1800,7 @@ def rith_d1_base_patch4_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1829,7 +1818,7 @@ def rith_d1_base_patch4_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1847,7 +1836,7 @@ def rith_d1_base_patch4_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1865,7 +1854,7 @@ def rith_d1_base_patch8_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1883,7 +1872,7 @@ def rith_d1_base_patch8_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1901,7 +1890,7 @@ def rith_d1_base_patch8_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1919,7 +1908,7 @@ def rith_d1_base_patch16_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1937,7 +1926,7 @@ def rith_d1_base_patch16_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1955,7 +1944,7 @@ def rith_d1_base_patch16_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1973,7 +1962,7 @@ def rith_d1_base_patch32_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -1991,7 +1980,7 @@ def rith_d1_base_patch32_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -2009,7 +1998,7 @@ def rith_d1_base_patch32_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=15,
+        max_repeats=12,
         dropout=0,
         halt_pool="cls",
     )
@@ -2027,7 +2016,7 @@ def rith_d1_large_patch4_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2045,7 +2034,7 @@ def rith_d1_large_patch4_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2063,7 +2052,7 @@ def rith_d1_large_patch4_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2081,7 +2070,7 @@ def rith_d1_large_patch8_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2099,7 +2088,7 @@ def rith_d1_large_patch8_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2117,7 +2106,7 @@ def rith_d1_large_patch8_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2135,7 +2124,7 @@ def rith_d1_large_patch16_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2153,7 +2142,7 @@ def rith_d1_large_patch16_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2171,7 +2160,7 @@ def rith_d1_large_patch16_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2189,7 +2178,7 @@ def rith_d1_large_patch32_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2207,7 +2196,7 @@ def rith_d1_large_patch32_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2225,7 +2214,7 @@ def rith_d1_large_patch32_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=30,
+        max_repeats=24,
         dropout=0,
         halt_pool="cls",
     )
@@ -2243,7 +2232,7 @@ def rith_d1_huge_patch4_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2261,7 +2250,7 @@ def rith_d1_huge_patch4_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2279,7 +2268,7 @@ def rith_d1_huge_patch4_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2297,7 +2286,7 @@ def rith_d1_huge_patch8_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2315,7 +2304,7 @@ def rith_d1_huge_patch8_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2333,7 +2322,7 @@ def rith_d1_huge_patch8_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2351,7 +2340,7 @@ def rith_d1_huge_patch16_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2369,7 +2358,7 @@ def rith_d1_huge_patch16_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2387,7 +2376,7 @@ def rith_d1_huge_patch16_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2405,7 +2394,7 @@ def rith_d1_huge_patch32_32(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2423,7 +2412,7 @@ def rith_d1_huge_patch32_64(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
@@ -2441,8 +2430,7 @@ def rith_d1_huge_patch32_224(pretrained= False, **kwargs):
         depth=1,
         halt_threshold=None,
         mlp_ratio=4.0,
-        max_repeats=40,
+        max_repeats=32,
         dropout=0,
         halt_pool="cls",
     )
-

@@ -6,7 +6,7 @@ DIMS = {
     "huge": 1536,
 }
 DEPTHS = {
-    "tiny": 6,
+    "tiny": 12,
     "small": 12,
     "base": 12,
     "large": 24,
