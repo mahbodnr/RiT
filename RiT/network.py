@@ -11,12 +11,14 @@ from RiT.utils import get_criterion, get_scheduler, get_layer_outputs
 from RiT.augmentation import CutMix, MixUp
 
 from RiT.models.repeat_transformer import RiTHalt
+import matplotlib.pyplot as plt
 
 class Net(pl.LightningModule):
     def __init__(self, hparams):
         super(Net, self).__init__()
-        self._sample_input_data = hparams._sample_input_data
-        del hparams._sample_input_data
+        if hasattr(hparams, "_sample_input_data"):
+            self._sample_input_data = hparams._sample_input_data
+            del hparams._sample_input_data
         self.hparams.update(vars(hparams))
         self.save_hyperparameters(
             ignore=[key for key in self.hparams.keys() if key[0] == "_"]
@@ -139,9 +141,9 @@ class Net(pl.LightningModule):
         self.log("train_loss", loss)
         self.log("train_acc", acc)
 
-        if isinstance(self.model, RiTHalt):
-            self.log("average iterations", self.model.iterations.mean().item())
-            self.log_histogram(self.model.iterations, "iterations", self.global_step)
+        # if isinstance(self.model, RiTHalt):
+            # self.log("average iterations", self.model.iterations.mean().item())
+            # self.log_histogram(self.model.iterations, "iterations", self.global_step)
 
         return {
             "loss": loss,
@@ -159,6 +161,32 @@ class Net(pl.LightningModule):
         # log output histogram of each layer
         if self.hparams.log_layer_outputs:
             self.log_layer_outputs()
+
+        if hasattr(self.model, "halt_noise_scale"):
+            if self.model.halt_noise_scale != 0:
+                self.model.halt_noise_scale = (5-1) * self.current_epoch / (self.trainer.max_epochs ) + 1
+            self.log("halt_noise_scale", self.model.halt_noise_scale)
+
+        with torch.no_grad():
+            res = self.model.inference(self._sample_input_data,
+                                    repeats= self.model.repeats,
+                                    halt="classify",
+                                    halt_threshold=self.model.halt_threshold,
+                                    ema_alpha=0.5,
+                                    halt_noise_scale=self.model.halt_noise_scale,
+                                    )
+            block_halt = torch.stack(res['block_halt'])[...,0]
+            plt.figure(figsize=(10, 6))
+            plt.plot(block_halt.cpu().numpy())
+            plt.title(f"Block Halt, epoch: {self.current_epoch}")
+            plt.savefig("block_halt.png")
+            plt.clf()
+            # log to wandb
+            if isinstance(self.logger, pl.loggers.WandbLogger):
+                self.logger.experiment.log(
+                    {"Block Halt": wandb.Image("block_halt.png")},
+                    step=self.global_step,
+                )
 
     def optimizer_step(self, *args, **kwargs):
         """

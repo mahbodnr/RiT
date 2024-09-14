@@ -5,11 +5,8 @@ from timm.models.vision_transformer import Attention
 from timm.layers import PatchEmbed, Mlp, trunc_normal_
 from timm.models.registry import register_model
 
-from .vit import ViTBlock
+from timm.models.vision_transformer import Block as ViTBlock
 
-
-def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 class TimestepEmbedder(nn.Module):
     """
@@ -80,15 +77,19 @@ class DiTBlock(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True),
         )
 
+    @staticmethod
+    def modulate(x, shift, scale):
+        return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
     def forward(self, x, c):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
             self.adaLN_modulation(c).chunk(6, dim=1)
         )
         x = x + gate_msa.unsqueeze(1) * self.attn(
-            modulate(self.norm1(x), shift_msa, scale_msa)
+            self.modulate(self.norm1(x), shift_msa, scale_msa)
         )
         x = x + gate_mlp.unsqueeze(1) * self.mlp(
-            modulate(self.norm2(x), shift_mlp, scale_mlp)
+            self.modulate(self.norm2(x), shift_mlp, scale_mlp)
         )
         return x
 
@@ -179,30 +180,110 @@ class RiT(nn.Module):
         x = self.head(x)
         return x
 
-class SimpleRiT(RiT):
+class SimpleRiT(nn.Module):
     def __init__(
         self,
-        img_size=224,
+        image_size=224,
         patch_size=16,
         channels=3,
         num_classes=1000,
         dim=384,
-        depth=12,
+        repeats=12,
+        depth=1,
         heads=6,
         mlp_ratio=4.0,
+        pool="cls",
+        halt = None,
+        ema_alpha=0.5,
+        halt_threshold=0.9,
+        halt_noise_scale=1,
+        dropout=0.0,
     ):
-        super().__init__(
-            image_size=img_size,
+        super().__init__()
+        self.num_classes = num_classes
+        self.num_features = self.dim = dim
+        self.repeats = repeats
+        assert pool in {
+            "cls",
+            "mean",
+        }, "pool type must be either cls (cls token) or mean (mean pooling)"
+        self.pool = pool
+
+        self.patch_embed = PatchEmbed(
+            img_size=image_size,
             patch_size=patch_size,
-            channels=channels,
-            num_classes=num_classes,
-            dim=dim,
-            depth=depth,
-            heads=heads,
-            mlp_ratio=mlp_ratio,
+            in_chans=channels,
+            embed_dim=dim,
         )
-        del self.timestep_embedder
-        self.block = ViTBlock(dim, heads, mlp_ratio=mlp_ratio)
+
+        self.num_patches = self.patch_embed.num_patches + (pool=="cls") + (halt is not None)
+        
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, self.num_patches, dim)
+        )
+        trunc_normal_(self.pos_embed, std=0.02)
+
+        if pool == "cls":
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
+            trunc_normal_(self.cls_token, std=0.02)
+
+        self.blocks = nn.ModuleList(
+            [ViTBlock(
+                dim, 
+                heads, 
+                mlp_ratio=mlp_ratio, 
+                proj_drop=dropout, 
+                attn_drop=dropout
+                ) for _ in range(depth)]
+        )
+
+        self.norm = nn.LayerNorm(dim, eps=1e-6)
+        self.head = nn.Linear(dim, num_classes)
+
+        # halt mechanism
+        assert halt in {
+            None,
+            "ema",
+            "add",
+            "classify",
+        }, f"halt type must be either None, ema, add, or classify. Got {halt}"
+        self.halt = halt
+        if halt is not None:
+            assert 0 <= halt_threshold <= 1, "halt_threshold must be in [0, 1]"
+            self.halt_threshold = halt_threshold
+            self.halt_token = nn.Parameter(torch.zeros(1, 1, dim))
+            trunc_normal_(self.halt_token, std=0.02)
+            self.halt_block = nn.Sequential(
+                nn.Linear(dim, dim, bias=True),
+                nn.SiLU(),
+                nn.Linear(dim, 1, bias=False),
+                # nn.Sigmoid(),
+            )
+            self.halt_noise_scale = halt_noise_scale
+
+        if halt == "ema":
+            self.ema_alpha = ema_alpha
+
+
+    def embed_input(self, x):
+        x = self.patch_embed(x)  # (B, N, D)
+        if self.cls_token is not None:
+            x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1) # put cls token at the beginning
+        if self.halt is not None:
+            x = torch.cat((x, self.halt_token.expand(x.shape[0], -1, -1)), dim=1) # put halt token at the end
+        x = x + self.pos_embed
+
+        return x
+    
+    def classify(self, x):
+        x = self.norm(x)
+        if self.cls_token is not None:
+            x = x.mean(dim=1)
+        else:
+            x = x[:, 0]
+        x = self.head(x)
+
+        return x
 
     def forward(self, x):
         """
@@ -211,25 +292,113 @@ class SimpleRiT(RiT):
         :param x: a (B, H, W, C) image tensor.
         :return: a (B, num_classes) tensor of logits.
         """
-        x = self.patch_embed(x)  # (B, N, D)
-        if self.cls_token is not None:
-            x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
-        x = x + self.pos_embed
+        x = self.embed_input(x)
 
-        for t in range(self.depth):
-            x = self.block(x)
+        if self.halt is not None:
+            if self.halt == "classify":
+                output = torch.zeros(x.shape[0], self.num_classes, device=x.device, dtype=x.dtype)
+            else:
+                halt_probs = x.new_zeros((x.shape[0], 1, 1))
+                halted = torch.zeros_like(halt_probs, dtype=torch.bool)
 
-        x = self.norm(x)
+        for t in range(self.repeats):
+            for block in self.blocks:
+                prev_x = x.clone()
+                x = block(x)
 
-        if self.cls_token is not None:
-            x = x.mean(dim=1)
-        else:
-            x = x[:, 0]
+                if self.halt is not None:
+                    if self.halt == "classify":
+                        block_halt = self.halt_block(x[:, -1])
+                        block_halt_prob = torch.sigmoid(
+                            block_halt + self.halt_noise_scale * torch.randn_like(block_halt)
+                        )
+                        output = output + block_halt_prob * self.classify(x)
+                    else:
+                        x = torch.lerp(x, prev_x, halt_probs)
+                        block_halt = self.halt_block(x[:, -1])
+                        block_halt_prob = torch.sigmoid(
+                            block_halt + self.halt_noise_scale * torch.randn_like(block_halt)
+                        ).unsqueeze(1)
 
-        x = self.head(x)
-        return x
+                        if self.halt == "ema":
+                            halt_probs = torch.lerp(halt_probs, block_halt_prob, self.ema_alpha)
+                        elif self.halt == "add":
+                            halt_probs = halt_probs + (1-halt_probs) * block_halt_prob
+
+                        if self.halt_threshold<1:
+                            halted = halted + (halt_probs >= self.halt_threshold)
+                            halt_probs = halted + halt_probs * ~halted
+
+        if self.halt == "classify":
+            return output
+
+        output = self.classify(x)
+        return output
+
+    def inference(self, x, repeats, halt, halt_threshold, ema_alpha, halt_noise_scale=0):
+        halt_probs_hist = []
+        halted_hist = []
+        block_halt_hist = []
+        x = self.embed_input(x)
+
+        if halt is not None:
+            if halt == "classify":
+                output = torch.zeros(x.shape[0], self.num_classes, device=x.device, dtype=x.dtype)
+            else:
+                halt_probs = x.new_zeros((x.shape[0], 1, 1))
+                halted = torch.zeros_like(halt_probs, dtype=torch.bool)
+
+        layer_outputs = []
+        for t in range(repeats):
+            for block in self.blocks:
+                prev_x = x.clone()
+                x = block(x)
+
+                if halt is not None:
+                    if halt == "classify":
+                        block_halt = self.halt_block(x[:, -1])
+                        block_halt_prob = torch.sigmoid(
+                            block_halt + halt_noise_scale * torch.randn_like(block_halt)
+                        )
+                        layer_outputs.append(self.classify(x))
+                        output = output + block_halt_prob * self.classify(x)
+                    else:
+                        x = torch.lerp(x, prev_x, halt_probs)
+                        block_halt = self.halt_block(x[:, -1])
+                        block_halt_prob = torch.sigmoid(
+                            block_halt + halt_noise_scale * torch.randn_like(block_halt)
+                        ).unsqueeze(1)
+
+                        if halt == "ema":
+                            halt_probs = torch.lerp(halt_probs, block_halt_prob, ema_alpha)
+                        elif halt == "add":
+                            halt_probs = halt_probs + (1-halt_probs) * block_halt_prob
+
+                        if halt_threshold<1:
+                            halted = halted + (halt_probs >= halt_threshold)
+                            halt_probs = halted + halt_probs * ~halted
+
+                        halt_probs_hist.append(halt_probs.clone().detach())
+                        halted_hist.append(halted.clone().detach())
+                    block_halt_hist.append(block_halt_prob.clone().detach())
 
 
+        if halt == "classify":
+            return {
+                "logits": output,
+                "layer_outputs": layer_outputs,
+                "halt_probs": halt_probs_hist,
+                "halted": halted_hist,
+                "block_halt": block_halt_hist,
+            }
+        x = self.classify(x)
+        return {
+            "logits": x,
+            "halt_probs": halt_probs_hist,
+            "halted": halted_hist,
+            "block_halt": block_halt_hist,
+        }
+        
 class DiTBlockHalt(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
@@ -237,11 +406,12 @@ class DiTBlockHalt(nn.Module):
 
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, dropout=0.0, pool="mean"):
         super().__init__()
-        self.pool = pool
         assert pool in {
-            "cls",
+            None,
             "mean",
-        }, "pool type must be either cls (cls token) or mean (mean pooling)"
+            "cls",
+        }, "halt_pool type must be either cls (cls token) or mean (average pooling)"
+        self.pool = pool
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(
             hidden_size, num_heads=num_heads, qkv_bias=True, attn_drop=dropout, proj_drop=dropout,
@@ -255,30 +425,42 @@ class DiTBlockHalt(nn.Module):
             act_layer=approx_gelu,
             drop=dropout,
         )
-        self.halt = nn.Linear(hidden_size, 1, bias=True)
+        # self.halt = nn.Linear(hidden_size, 1, bias=True)
+        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.halt = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size, bias=True),
+            nn.SiLU(),
+            nn.Linear(hidden_size, 1, bias=True),
+            nn.Sigmoid(),
+        )
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_size, 7 * hidden_size, bias=True),
+            nn.Linear(hidden_size, 8 * hidden_size, bias=True),
         )
 
+    @staticmethod
+    def modulate(x, shift, scale):
+        return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    
     def forward(self, x, c):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, halt_mlp = (
-            self.adaLN_modulation(c).chunk(7, dim=1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_halt, scale_halt,  = (
+            self.adaLN_modulation(c).chunk(8, dim=1)
         )
         x = x + gate_msa.unsqueeze(1) * self.attn(
-            modulate(self.norm1(x), shift_msa, scale_msa)
+            self.modulate(self.norm1(x), shift_msa, scale_msa)
         )
         x = x + gate_mlp.unsqueeze(1) * self.mlp(
-            modulate(self.norm2(x), shift_mlp, scale_mlp)
+            self.modulate(self.norm2(x), shift_mlp, scale_mlp)
         )
 
         if self.pool == "cls":
-            halt_prob = torch.sigmoid(self.halt(x[:, 0] * halt_mlp))
+            halt_x = x[:, 0:1]
         elif self.pool == "mean":
-            halt_prob = torch.sigmoid(self.halt(x.mean(dim=1) * halt_mlp))
+            halt_x = x.mean(dim=1, keepdim=True)
         else:
-            raise NotImplementedError(f"pool type {self.pool} not implemented")
+            halt_x = x
 
+        halt_prob = self.halt(self.modulate(self.norm3(halt_x), shift_halt, scale_halt))
         return x, halt_prob
 
 class RiTHalt(nn.Module):
@@ -291,7 +473,7 @@ class RiTHalt(nn.Module):
         dim=384,
         depth=3,
         max_repeats=10,
-        halt_threshold=0.5,
+        halt_threshold=0.95,
         heads=6,
         mlp_ratio=4.0,
         pool="cls",
@@ -303,11 +485,12 @@ class RiTHalt(nn.Module):
         self.num_features = self.dim = dim
         self.depth = depth
         assert pool in {
+            None,
             "cls",
             "mean",
         }, "pool type must be either cls (cls token) or mean (average pooling)"
         self.pool = pool
-        assert max_repeats > 0, "max_repeats must be greater than 0"
+        self.halt_pool = halt_pool
         self.max_repeats = max_repeats
         assert (halt_threshold is None) or (0 <= halt_threshold <= 1), "halt_threshold must be in [0, 1]"
         self.halt_threshold = halt_threshold
@@ -359,29 +542,24 @@ class RiTHalt(nn.Module):
             x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = x + self.pos_embed
 
-        halt_probs = x.new_zeros((x.shape[0], 1, 1))
-        self.iterations = torch.zeros_like(halt_probs)
-        # self.halt_probs_hist = [] # DELETE LATER
+        if self.halt_pool is None:
+            halt_probs = x.new_zeros((x.shape[0], x.shape[1], 1))
+        else:
+            halt_probs = x.new_zeros((x.shape[0], 1, 1))        
+        halted = torch.zeros_like(halt_probs, dtype=torch.bool)
         timesteps = self.timesteps.expand(self.max_repeats, x.shape[0])  # (T, B)
         for t in timesteps:
             for block in self.blocks:
-                prev_x = x
-
-                # Check for halting threshold
-                if self.halt_threshold is None:
-                    halt_probs[halt_probs > torch.rand_like(halt_probs)] = 1
-                else:
-                    halt_probs[halt_probs >= self.halt_threshold] = 1
-                
-                # update x
+                prev_x = x.clone()
                 x, block_halt = block(x, self.timestep_embedder(t))
                 x = torch.lerp(x, prev_x, halt_probs) # = x * (1-halt_probs) + prev_x * halt_probs
-                # update halt_probs
-                halt_probs = halt_probs + (1-halt_probs) * block_halt.unsqueeze(1)
-                # monitor halting probabilities
-                # self.halt_probs_hist.append(halt_probs.clone().detach()) # DELETE LATER
-                self.iterations += (halt_probs < 1) 
-
+                # add-up approach:
+                # halt_probs = halt_probs + (1-halt_probs) * block_halt
+                # EMA approach:
+                alpha = 0.5
+                halt_probs = torch.lerp(halt_probs, block_halt, alpha)
+                halted = halted + (halt_probs > self.halt_threshold)
+                halt_probs = halted + halt_probs * ~halted
 
         x = self.norm(x)
 
@@ -394,6 +572,111 @@ class RiTHalt(nn.Module):
 
         x = self.head(x)
         return x
+
+    # def forward(self, x):
+    #     """
+    #     Forward pass of the model.
+
+    #     :param x: a (B, H, W, C) image tensor.
+    #     :return: a (B, num_classes) tensor of logits.
+    #     """
+    #     x = self.patch_embed(x)  # (B, N, D)
+    #     if self.pool == "cls":
+    #         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+    #     x = x + self.pos_embed
+
+    #     if self.halt_pool is None:
+    #         halt_probs = x.new_zeros((x.shape[0], x.shape[1], 1))
+    #     else:
+    #         halt_probs = x.new_zeros((x.shape[0], 1, 1))
+    #     halted = torch.zeros_like(halt_probs, dtype=torch.bool)
+    #     timesteps = self.timesteps.expand(self.max_repeats, x.shape[0])  # (T, B)
+    #     for t in timesteps:
+    #         for block in self.blocks:
+    #             prev_x = x
+
+    #             # update x
+    #             still_running = ~halted.view(-1)
+    #             block_halt = torch.zeros_like(halt_probs)
+    #             x[still_running], block_halt[still_running] = block(x[still_running], self.timestep_embedder(t)[still_running])
+    #             x[still_running] = torch.lerp(x[still_running], prev_x[still_running], halt_probs[still_running]) # = x * (1-halt_probs) + prev_x * halt_probs
+    #             # update halt_probs:
+    #             # add-up approach:
+    #             halt_probs = halt_probs + (1-halt_probs) * block_halt
+    #             # EMA approach:
+    #             # alpha = 0.5
+    #             # halt_probs = torch.lerp(halt_probs, block_halt, alpha)
+
+    #             halted = halted + (halt_probs > self.halt_threshold)
+    #             halt_probs = halted + halt_probs * ~halted
+
+    #     x = self.norm(x)
+
+    #     if self.pool == "mean":
+    #         x = x.mean(dim=1)
+    #     elif self.pool == "cls":
+    #         x = x[:, 0]
+    #     else:
+    #         raise NotImplementedError(f"pool type {self.pool} not implemented")
+
+    #     x = self.head(x)
+    #     return x
+    
+
+    def inference(self, x, max_repeats, halt_threshold, alpha):
+        x = self.patch_embed(x)  # (B, N, D)
+        if self.pool == "cls":
+            x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+        x = x + self.pos_embed
+
+        if self.halt_pool is None:
+            halt_probs = x.new_zeros((x.shape[0], x.shape[1], 1))
+        else:
+            halt_probs = x.new_zeros((x.shape[0], 1, 1))         
+        halted = torch.zeros_like(halt_probs, dtype=torch.bool)
+        halt_probs_hist = []
+        halted_hist = []
+        block_halt_hist = []
+        timesteps = torch.arange(
+            max_repeats, device=x.device, 
+        ).unsqueeze(1).expand(max_repeats, x.shape[0])  # (T, B)
+        for t in timesteps:
+            for block in self.blocks:
+                prev_x = x.clone()
+
+                # update x
+                x, block_halt = block(x, self.timestep_embedder(t))
+                x = torch.lerp(x, prev_x, halt_probs) # = x * (1-halt_probs) + prev_x * halt_probs
+                # update halt_probs:
+                # add-up approach:
+                # halt_probs = halt_probs + (1-halt_probs) * block_halt
+                # EMA approach:
+                halt_probs = torch.lerp(halt_probs, block_halt, alpha)
+                halted = halted + (halt_probs > halt_threshold)
+                halt_probs = halted + halt_probs * ~halted
+
+                # monitor halting probabilities
+                halt_probs_hist.append(halt_probs.clone().detach()) 
+                halted_hist.append(halted.clone().detach())
+                block_halt_hist.append(block_halt.clone().detach())
+
+        x = self.norm(x)
+
+        if self.pool == "mean":
+            x = x.mean(dim=1)
+        elif self.pool == "cls":
+            x = x[:, 0]
+        else:
+            raise NotImplementedError(f"pool type {self.pool} not implemented")
+
+        x = self.head(x)
+        return {
+            "logits": x,
+            "halt_probs": halt_probs_hist,
+            "halted": halted_hist,
+            "block_halt": block_halt_hist,
+        }
+    
 
 @register_model
 def rit_d1_tiny_patch4_32(pretrained= False, **kwargs):
@@ -1366,7 +1649,7 @@ def rith_d1_tiny_patch4_32(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1384,11 +1667,11 @@ def rith_d1_tiny_patch4_64(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
-        halt_pool="cls",
+        halt_pool=None,
     )
 
 @register_model
@@ -1402,7 +1685,7 @@ def rith_d1_tiny_patch4_224(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1420,7 +1703,7 @@ def rith_d1_tiny_patch8_32(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1438,7 +1721,7 @@ def rith_d1_tiny_patch8_64(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1456,7 +1739,7 @@ def rith_d1_tiny_patch8_224(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1474,7 +1757,7 @@ def rith_d1_tiny_patch16_32(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1492,7 +1775,7 @@ def rith_d1_tiny_patch16_64(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1510,9 +1793,9 @@ def rith_d1_tiny_patch16_224(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
-        max_repeats=12,
+        max_repeats=20,
         dropout=0,
         halt_pool="cls",
     )
@@ -1528,7 +1811,7 @@ def rith_d1_tiny_patch32_32(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1546,7 +1829,7 @@ def rith_d1_tiny_patch32_64(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1564,7 +1847,7 @@ def rith_d1_tiny_patch32_224(pretrained= False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1582,7 +1865,7 @@ def rith_d1_small_patch4_32(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1600,7 +1883,7 @@ def rith_d1_small_patch4_64(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1618,7 +1901,7 @@ def rith_d1_small_patch4_224(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1636,7 +1919,7 @@ def rith_d1_small_patch8_32(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1654,7 +1937,7 @@ def rith_d1_small_patch8_64(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1672,7 +1955,7 @@ def rith_d1_small_patch8_224(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1690,7 +1973,7 @@ def rith_d1_small_patch16_32(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1708,7 +1991,7 @@ def rith_d1_small_patch16_64(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1726,11 +2009,11 @@ def rith_d1_small_patch16_224(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
-        max_repeats=12,
+        max_repeats=20,
         dropout=0,
-        halt_pool="cls",
+        halt_pool=None,
     )
 
 @register_model
@@ -1744,7 +2027,7 @@ def rith_d1_small_patch32_32(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1762,7 +2045,7 @@ def rith_d1_small_patch32_64(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1780,7 +2063,7 @@ def rith_d1_small_patch32_224(pretrained= False, **kwargs):
         dim=384,
         heads=6,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1798,7 +2081,7 @@ def rith_d1_base_patch4_32(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1816,7 +2099,7 @@ def rith_d1_base_patch4_64(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1834,7 +2117,7 @@ def rith_d1_base_patch4_224(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1852,7 +2135,7 @@ def rith_d1_base_patch8_32(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1870,7 +2153,7 @@ def rith_d1_base_patch8_64(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1888,7 +2171,7 @@ def rith_d1_base_patch8_224(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1906,7 +2189,7 @@ def rith_d1_base_patch16_32(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1924,7 +2207,7 @@ def rith_d1_base_patch16_64(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1942,7 +2225,7 @@ def rith_d1_base_patch16_224(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1960,7 +2243,7 @@ def rith_d1_base_patch32_32(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1978,7 +2261,7 @@ def rith_d1_base_patch32_64(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -1996,7 +2279,7 @@ def rith_d1_base_patch32_224(pretrained= False, **kwargs):
         dim=768,
         heads=12,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=12,
         dropout=0,
@@ -2014,7 +2297,7 @@ def rith_d1_large_patch4_32(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2032,7 +2315,7 @@ def rith_d1_large_patch4_64(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2050,7 +2333,7 @@ def rith_d1_large_patch4_224(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2068,7 +2351,7 @@ def rith_d1_large_patch8_32(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2086,7 +2369,7 @@ def rith_d1_large_patch8_64(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2104,7 +2387,7 @@ def rith_d1_large_patch8_224(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2122,7 +2405,7 @@ def rith_d1_large_patch16_32(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2140,7 +2423,7 @@ def rith_d1_large_patch16_64(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2158,7 +2441,7 @@ def rith_d1_large_patch16_224(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2176,7 +2459,7 @@ def rith_d1_large_patch32_32(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2194,7 +2477,7 @@ def rith_d1_large_patch32_64(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2212,7 +2495,7 @@ def rith_d1_large_patch32_224(pretrained= False, **kwargs):
         dim=1024,
         heads=16,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=24,
         dropout=0,
@@ -2230,7 +2513,7 @@ def rith_d1_huge_patch4_32(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2248,7 +2531,7 @@ def rith_d1_huge_patch4_64(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2266,7 +2549,7 @@ def rith_d1_huge_patch4_224(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2284,7 +2567,7 @@ def rith_d1_huge_patch8_32(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2302,7 +2585,7 @@ def rith_d1_huge_patch8_64(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2320,7 +2603,7 @@ def rith_d1_huge_patch8_224(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2338,7 +2621,7 @@ def rith_d1_huge_patch16_32(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2356,7 +2639,7 @@ def rith_d1_huge_patch16_64(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2374,7 +2657,7 @@ def rith_d1_huge_patch16_224(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2392,7 +2675,7 @@ def rith_d1_huge_patch32_32(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2410,7 +2693,7 @@ def rith_d1_huge_patch32_64(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
@@ -2428,9 +2711,134 @@ def rith_d1_huge_patch32_224(pretrained= False, **kwargs):
         dim=1536,
         heads=24,
         depth=1,
-        halt_threshold=None,
+        halt_threshold=0.95,
         mlp_ratio=4.0,
         max_repeats=32,
         dropout=0,
         halt_pool="cls",
+    )
+
+
+@register_model
+def rith_d3_tiny_patch4_64(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=64,
+        patch_size=4,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=3,
+        halt_threshold=0.95,
+        mlp_ratio=4.0,
+        max_repeats=4,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def rith_d3_small_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return RiTHalt(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=3,
+        halt_threshold=0.95,
+        mlp_ratio=4.0,
+        max_repeats=4,
+        dropout=0,
+        halt_pool="cls",
+    )
+
+@register_model
+def srit_d1_tiny_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        repeats=12,
+        mlp_ratio=4.0,
+        halt_threshold=1,
+        halt="classify",
+        halt_noise_scale=1,
+    )
+
+@register_model
+def srit_d1_small_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        repeats=50,
+        mlp_ratio=4.0,
+        halt_threshold=1,
+        halt="classify",
+        halt_noise_scale=0,
+    )
+
+@register_model
+def srit_d3_small_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=3,
+        repeats=4,
+        mlp_ratio=4.0,
+        halt_threshold=0.95,
+        halt="ema",
+    )
+
+@register_model
+def srit_d1_base_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        repeats=12,
+        mlp_ratio=4.0,
+        halt_threshold=1,
+        halt="classify",        
+        halt_noise_scale=0,
+    )
+
+@register_model
+def srit_d3_base_patch16_224(pretrained= False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=3,
+        repeats=4,
+        mlp_ratio=4.0,
+        halt_threshold=0.95,
+        halt="ema",
     )
