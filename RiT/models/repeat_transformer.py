@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 from timm.models.vision_transformer import Attention
 from timm.layers import PatchEmbed, Mlp, trunc_normal_
@@ -32,7 +33,7 @@ class TimestepEmbedder(nn.Module):
         :return: an (N, D) Tensor of positional embeddings.
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
-        half = self.frequency_embedding_size  // 2
+        half = self.frequency_embedding_size // 2
         freqs = torch.exp(
             -math.log(max_period)
             * torch.arange(start=0, end=half, device=t.device, dtype=t.dtype)
@@ -40,7 +41,7 @@ class TimestepEmbedder(nn.Module):
         )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if self.frequency_embedding_size  % 2:
+        if self.frequency_embedding_size % 2:
             embedding = torch.cat(
                 [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
             )
@@ -61,7 +62,11 @@ class DiTBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(
-            hidden_size, num_heads=num_heads, qkv_bias=True, attn_drop=dropout, proj_drop=dropout,
+            hidden_size,
+            num_heads=num_heads,
+            qkv_bias=True,
+            attn_drop=dropout,
+            proj_drop=dropout,
         )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -141,7 +146,10 @@ class RiT(nn.Module):
             trunc_normal_(self.cls_token, std=0.02)
 
         self.blocks = nn.ModuleList(
-            [DiTBlock(dim, heads, mlp_ratio=mlp_ratio, dropout=dropout) for i in range(depth)]
+            [
+                DiTBlock(dim, heads, mlp_ratio=mlp_ratio, dropout=dropout)
+                for i in range(depth)
+            ]
         )
 
         self.norm = nn.LayerNorm(dim, eps=1e-6)
@@ -180,6 +188,7 @@ class RiT(nn.Module):
         x = self.head(x)
         return x
 
+
 class SimpleRiT(nn.Module):
     def __init__(
         self,
@@ -193,21 +202,27 @@ class SimpleRiT(nn.Module):
         heads=6,
         mlp_ratio=4.0,
         pool="cls",
-        halt = None,
+        halt=None,
         ema_alpha=0.5,
         halt_threshold=0.9,
         halt_noise_scale=1,
         dropout=0.0,
+        stochastic_depth=False,
+        extra_step=False, # DELETE LATER
+        normalize=False, # DELETE LATER
     ):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.dim = dim
         self.repeats = repeats
+        self.extra_step = extra_step # DELETE LATER
+        self.normalize = normalize # DELETE LATER
         assert pool in {
             "cls",
             "mean",
         }, "pool type must be either cls (cls token) or mean (mean pooling)"
         self.pool = pool
+        self.stochastic_depth = stochastic_depth
 
         self.patch_embed = PatchEmbed(
             img_size=image_size,
@@ -216,11 +231,11 @@ class SimpleRiT(nn.Module):
             embed_dim=dim,
         )
 
-        self.num_patches = self.patch_embed.num_patches + (pool=="cls") + (halt is not None)
-        
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, self.num_patches, dim)
+        self.num_patches = (
+            self.patch_embed.num_patches + (pool == "cls") + (halt is not None)
         )
+
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, dim))
         trunc_normal_(self.pos_embed, std=0.02)
 
         if pool == "cls":
@@ -228,13 +243,16 @@ class SimpleRiT(nn.Module):
             trunc_normal_(self.cls_token, std=0.02)
 
         self.blocks = nn.ModuleList(
-            [ViTBlock(
-                dim, 
-                heads, 
-                mlp_ratio=mlp_ratio, 
-                proj_drop=dropout, 
-                attn_drop=dropout
-                ) for _ in range(depth)]
+            [
+                ViTBlock(
+                    dim,
+                    heads,
+                    mlp_ratio=mlp_ratio,
+                    proj_drop=dropout,
+                    attn_drop=dropout,
+                )
+                for _ in range(depth)
+            ]
         )
 
         self.norm = nn.LayerNorm(dim, eps=1e-6)
@@ -264,17 +282,20 @@ class SimpleRiT(nn.Module):
         if halt == "ema":
             self.ema_alpha = ema_alpha
 
-
     def embed_input(self, x):
         x = self.patch_embed(x)  # (B, N, D)
         if self.cls_token is not None:
-            x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1) # put cls token at the beginning
+            x = torch.cat(
+                (self.cls_token.expand(x.shape[0], -1, -1), x), dim=1
+            )  # put cls token at the beginning
         if self.halt is not None:
-            x = torch.cat((x, self.halt_token.expand(x.shape[0], -1, -1)), dim=1) # put halt token at the end
+            x = torch.cat(
+                (x, self.halt_token.expand(x.shape[0], -1, -1)), dim=1
+            )  # put halt token at the end
         x = x + self.pos_embed
 
         return x
-    
+
     def classify(self, x):
         x = self.norm(x)
         if self.cls_token is not None:
@@ -293,39 +314,59 @@ class SimpleRiT(nn.Module):
         :return: a (B, num_classes) tensor of logits.
         """
         x = self.embed_input(x)
+        input = x.clone()
 
         if self.halt is not None:
             if self.halt == "classify":
-                output = torch.zeros(x.shape[0], self.num_classes, device=x.device, dtype=x.dtype)
+                output = torch.zeros(
+                    x.shape[0], self.num_classes, device=x.device, dtype=x.dtype
+                )
             else:
                 halt_probs = x.new_zeros((x.shape[0], 1, 1))
                 halted = torch.zeros_like(halt_probs, dtype=torch.bool)
 
-        for t in range(self.repeats):
+        if self.stochastic_depth:
+            repeats = (
+                torch.round(torch.normal(self.repeats, self.repeats / 5, (1,)))
+                .int()
+                .clamp(min=1)
+                .item()
+            )
+        else:
+            repeats = self.repeats
+        for t in range(repeats):
             for block in self.blocks:
                 prev_x = x.clone()
-                x = block(x)
+                x = block(x + input)
+                if self.normalize:
+                    x = (x - x.mean(dim=(-1, -2), keepdim=True)) / x.std(
+                        dim=(-1, -2), keepdim=True
+                    )
 
                 if self.halt is not None:
                     if self.halt == "classify":
                         block_halt = self.halt_block(x[:, -1])
                         block_halt_prob = torch.sigmoid(
-                            block_halt + self.halt_noise_scale * torch.randn_like(block_halt)
+                            block_halt
+                            + self.halt_noise_scale * torch.randn_like(block_halt)
                         )
                         output = output + block_halt_prob * self.classify(x)
                     else:
                         x = torch.lerp(x, prev_x, halt_probs)
                         block_halt = self.halt_block(x[:, -1])
                         block_halt_prob = torch.sigmoid(
-                            block_halt + self.halt_noise_scale * torch.randn_like(block_halt)
+                            block_halt
+                            + self.halt_noise_scale * torch.randn_like(block_halt)
                         ).unsqueeze(1)
 
                         if self.halt == "ema":
-                            halt_probs = torch.lerp(halt_probs, block_halt_prob, self.ema_alpha)
+                            halt_probs = torch.lerp(
+                                halt_probs, block_halt_prob, self.ema_alpha
+                            )
                         elif self.halt == "add":
-                            halt_probs = halt_probs + (1-halt_probs) * block_halt_prob
+                            halt_probs = halt_probs + (1 - halt_probs) * block_halt_prob
 
-                        if self.halt_threshold<1:
+                        if self.halt_threshold < 1:
                             halted = halted + (halt_probs >= self.halt_threshold)
                             halt_probs = halted + halt_probs * ~halted
 
@@ -335,24 +376,35 @@ class SimpleRiT(nn.Module):
         output = self.classify(x)
         return output
 
-    def inference(self, x, repeats, halt, halt_threshold, ema_alpha, halt_noise_scale=0):
+    def inference(
+        self, x, repeats, halt, halt_threshold, ema_alpha, halt_noise_scale=0
+    ):
         halt_probs_hist = []
         halted_hist = []
         block_halt_hist = []
         x = self.embed_input(x)
+        input = x.clone()
 
         if halt is not None:
             if halt == "classify":
-                output = torch.zeros(x.shape[0], self.num_classes, device=x.device, dtype=x.dtype)
+                output = torch.zeros(
+                    x.shape[0], self.num_classes, device=x.device, dtype=x.dtype
+                )
             else:
                 halt_probs = x.new_zeros((x.shape[0], 1, 1))
                 halted = torch.zeros_like(halt_probs, dtype=torch.bool)
 
         layer_outputs = []
+        block_outputs = []
         for t in range(repeats):
             for block in self.blocks:
                 prev_x = x.clone()
-                x = block(x)
+                x = block(x + input)
+                if self.normalize:
+                    x = (x - x.mean(dim=(-1, -2), keepdim=True)) / x.std(
+                        dim=(-1, -2), keepdim=True
+                    )
+                block_outputs.append(x.clone().detach())
 
                 if halt is not None:
                     if halt == "classify":
@@ -370,18 +422,19 @@ class SimpleRiT(nn.Module):
                         ).unsqueeze(1)
 
                         if halt == "ema":
-                            halt_probs = torch.lerp(halt_probs, block_halt_prob, ema_alpha)
+                            halt_probs = torch.lerp(
+                                halt_probs, block_halt_prob, ema_alpha
+                            )
                         elif halt == "add":
-                            halt_probs = halt_probs + (1-halt_probs) * block_halt_prob
+                            halt_probs = halt_probs + (1 - halt_probs) * block_halt_prob
 
-                        if halt_threshold<1:
+                        if halt_threshold < 1:
                             halted = halted + (halt_probs >= halt_threshold)
                             halt_probs = halted + halt_probs * ~halted
 
                         halt_probs_hist.append(halt_probs.clone().detach())
                         halted_hist.append(halted.clone().detach())
                     block_halt_hist.append(block_halt_prob.clone().detach())
-
 
         if halt == "classify":
             return {
@@ -390,6 +443,7 @@ class SimpleRiT(nn.Module):
                 "halt_probs": halt_probs_hist,
                 "halted": halted_hist,
                 "block_halt": block_halt_hist,
+                "block_outputs": block_outputs,
             }
         x = self.classify(x)
         return {
@@ -397,8 +451,206 @@ class SimpleRiT(nn.Module):
             "halt_probs": halt_probs_hist,
             "halted": halted_hist,
             "block_halt": block_halt_hist,
+            "block_outputs": block_outputs,
         }
+
+
+class SimpleRiT2(SimpleRiT):
+    def forward(self, x):
+        """
+        Forward pass of the model.
+
+        :param x: a (B, H, W, C) image tensor.
+        :return: a (B, num_classes) tensor of logits.
+        """
+        assert self.halt == "classify", "SimpleRiT2 only supports halt='classify'"
+        x = self.embed_input(x)
+
+        outputs = []
+        block_outputs = [] # DELETE LATER
+        confidences = []
+        if self.stochastic_depth:
+            repeats = (
+                torch.round(torch.normal(self.repeats, self.repeats / 5, (1,)))
+                .int()
+                .clamp(min=1)
+                .item()
+            )
+        else:
+            repeats = self.repeats
+        for t in range(repeats):
+            for block in self.blocks:
+                x = block(x)
+                if self.normalize:
+                    x = (x - x.mean(dim=(-1, -2), keepdim=True)) / x.std(
+                        dim=(-1, -2), keepdim=True)
+                block_halt = self.halt_block(x[:, -1])
+                # block_halt = torch.sigmoid(block_halt + self.halt_noise_scale * torch.randn_like(block_halt))
+                block_outputs.append(x.clone().detach()) # DELETE LATER
+                outputs.append(self.classify(x))
+                confidences.append(block_halt.squeeze(-1))
+
+        if self.extra_step:
+            x = block(x)
+            if self.normalize:
+                x = (x - x.mean(dim=(-1, -2), keepdim=True)) / x.std(
+                    dim=(-1, -2), keepdim=True)
+            outputs.append(self.classify(x))
+
+        block_outputs = torch.stack(block_outputs) # DELETE LATER
+        outputs = torch.stack(outputs)
+        confidences = torch.stack(confidences)
+        confidences = F.softmax(confidences, dim=0)
+        confidences = torch.cumsum(confidences, dim=0)
+
+        return {
+            "logits": outputs,  # (N, B, C)
+            "confidences": confidences,  # (N, B)
+            "block_outputs": block_outputs,  # DELETE LATER
+        }
+
+from timm.models.vision_transformer import Attention,Mlp
+class ViTBlockIm(nn.Module):
+    def __init__(
+            self,
+            dim: int,
+            num_heads: int,
+            mlp_ratio: float = 4.,
+            qkv_bias: bool = False,
+            qk_norm: bool = False,
+            proj_drop: float = 0.,
+            attn_drop: float = 0.,
+            init_values: float = None,
+            drop_path: float = 0.,
+            act_layer: nn.Module = nn.GELU,
+            norm_layer: nn.Module = nn.LayerNorm,
+            mlp_layer: nn.Module = Mlp,
+    ) -> None:
+        super().__init__()
+        self.norm1 = norm_layer(dim)
+        self.attn = Attention(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
+            norm_layer=norm_layer,
+        )
+
+        self.norm2 = norm_layer(dim)
+        self.mlp = mlp_layer(
+            in_features=dim,
+            hidden_features=int(dim * mlp_ratio),
+            act_layer=act_layer,
+            drop=proj_drop,
+        )
+
+    def forward(self, x: torch.Tensor, inj=None) -> torch.Tensor:
+        x = x + self.attn(x)
+        x = x + self.mlp(self.norm1(x))
+        x = self.norm2(x)
+        return x
+
+
+class SimpleRiT3(SimpleRiT):
+    def __init__(
+        self,
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=1000,
+        dim=384,
+        repeats=12,
+        depth=1,
+        heads=6,
+        mlp_ratio=4.0,
+        pool="cls",
+        halt=None,
+        ema_alpha=0.5,
+        halt_threshold=0.9,
+        halt_noise_scale=1,
+        dropout=0.0,
+        stochastic_depth=False,
+        extra_step=False, # DELETE LATER
+        normalize=False, # DELETE LATER
+    ):
+        super().__init__(
+            image_size=image_size,
+            patch_size=patch_size,
+            channels=channels,
+            num_classes=num_classes,
+            dim=dim,
+            repeats=repeats,
+            depth=depth,
+            heads=heads,
+            mlp_ratio=mlp_ratio,
+            pool=pool,
+            halt=halt,
+            ema_alpha=ema_alpha,
+            halt_threshold=halt_threshold,
+            halt_noise_scale=halt_noise_scale,
+            dropout=dropout,
+            stochastic_depth=stochastic_depth,
+            extra_step=extra_step, # DELETE LATER
+            normalize=normalize, # DELETE LATER
+        )
+
+        self.injection = nn.Linear(dim, dim, bias=True)
+        self.blocks = nn.ModuleList(
+            [
+                ViTBlockIm(
+                    dim,
+                    heads,
+                    mlp_ratio=mlp_ratio,
+                    proj_drop=dropout,
+                    attn_drop=dropout,
+                )
+                for _ in range(depth)
+            ]
+        )
+
+
+
+    def forward(self, x):
+        """
+        Forward pass of the model.
+
+        :param x: a (B, H, W, C) image tensor.
+        :return: a (B, num_classes) tensor of logits.
+        """
+        assert self.halt == None, "SimpleRiT3 does not support halt"
         
+        x = self.embed_input(x)
+        injection = self.injection(x)
+
+        outputs = []
+        block_outputs = [] # DELETE LATER
+        z = torch.zeros_like(x)
+
+        if self.stochastic_depth:
+            repeats = (
+                torch.round(torch.normal(self.repeats, self.repeats / 5, (1,)))
+                .int()
+                .clamp(min=1)
+                .item()
+            )
+        else:
+            repeats = self.repeats
+        for t in range(repeats):
+            for block in self.blocks:
+                z = block(z + injection)
+                block_outputs.append(z.clone().detach()) # DELETE LATER
+                outputs.append(self.classify(z))
+
+        block_outputs = torch.stack(block_outputs) # DELETE LATER
+        outputs = torch.stack(outputs)
+
+        return {
+            "logits": outputs,  # (N, B, C)
+            "block_outputs": block_outputs,  # DELETE LATER
+        }
+
 class DiTBlockHalt(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
@@ -414,7 +666,11 @@ class DiTBlockHalt(nn.Module):
         self.pool = pool
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(
-            hidden_size, num_heads=num_heads, qkv_bias=True, attn_drop=dropout, proj_drop=dropout,
+            hidden_size,
+            num_heads=num_heads,
+            qkv_bias=True,
+            attn_drop=dropout,
+            proj_drop=dropout,
         )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
@@ -441,11 +697,18 @@ class DiTBlockHalt(nn.Module):
     @staticmethod
     def modulate(x, shift, scale):
         return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-    
+
     def forward(self, x, c):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_halt, scale_halt,  = (
-            self.adaLN_modulation(c).chunk(8, dim=1)
-        )
+        (
+            shift_msa,
+            scale_msa,
+            gate_msa,
+            shift_mlp,
+            scale_mlp,
+            gate_mlp,
+            shift_halt,
+            scale_halt,
+        ) = self.adaLN_modulation(c).chunk(8, dim=1)
         x = x + gate_msa.unsqueeze(1) * self.attn(
             self.modulate(self.norm1(x), shift_msa, scale_msa)
         )
@@ -462,6 +725,7 @@ class DiTBlockHalt(nn.Module):
 
         halt_prob = self.halt(self.modulate(self.norm3(halt_x), shift_halt, scale_halt))
         return x, halt_prob
+
 
 class RiTHalt(nn.Module):
     def __init__(
@@ -492,13 +756,15 @@ class RiTHalt(nn.Module):
         self.pool = pool
         self.halt_pool = halt_pool
         self.max_repeats = max_repeats
-        assert (halt_threshold is None) or (0 <= halt_threshold <= 1), "halt_threshold must be in [0, 1]"
+        assert (halt_threshold is None) or (
+            0 <= halt_threshold <= 1
+        ), "halt_threshold must be in [0, 1]"
         self.halt_threshold = halt_threshold
 
         self.timesteps = torch.nn.parameter.Parameter(
             torch.arange(self.max_repeats).unsqueeze(1),
             requires_grad=False,
-        )  # (T, B)       
+        )  # (T, B)
         self.patch_embed = PatchEmbed(
             img_size=image_size,
             patch_size=patch_size,
@@ -516,13 +782,12 @@ class RiTHalt(nn.Module):
             trunc_normal_(self.cls_token, std=0.02)
 
         self.blocks = nn.ModuleList(
-            [DiTBlockHalt(
-                dim, 
-                heads, 
-                mlp_ratio=mlp_ratio, 
-                dropout=dropout, 
-                pool=halt_pool
-            ) for _ in range(depth)]
+            [
+                DiTBlockHalt(
+                    dim, heads, mlp_ratio=mlp_ratio, dropout=dropout, pool=halt_pool
+                )
+                for _ in range(depth)
+            ]
         )
 
         self.norm = nn.LayerNorm(dim, eps=1e-6)
@@ -545,14 +810,16 @@ class RiTHalt(nn.Module):
         if self.halt_pool is None:
             halt_probs = x.new_zeros((x.shape[0], x.shape[1], 1))
         else:
-            halt_probs = x.new_zeros((x.shape[0], 1, 1))        
+            halt_probs = x.new_zeros((x.shape[0], 1, 1))
         halted = torch.zeros_like(halt_probs, dtype=torch.bool)
         timesteps = self.timesteps.expand(self.max_repeats, x.shape[0])  # (T, B)
         for t in timesteps:
             for block in self.blocks:
                 prev_x = x.clone()
                 x, block_halt = block(x, self.timestep_embedder(t))
-                x = torch.lerp(x, prev_x, halt_probs) # = x * (1-halt_probs) + prev_x * halt_probs
+                x = torch.lerp(
+                    x, prev_x, halt_probs
+                )  # = x * (1-halt_probs) + prev_x * halt_probs
                 # add-up approach:
                 # halt_probs = halt_probs + (1-halt_probs) * block_halt
                 # EMA approach:
@@ -621,7 +888,6 @@ class RiTHalt(nn.Module):
 
     #     x = self.head(x)
     #     return x
-    
 
     def inference(self, x, max_repeats, halt_threshold, alpha):
         x = self.patch_embed(x)  # (B, N, D)
@@ -632,21 +898,28 @@ class RiTHalt(nn.Module):
         if self.halt_pool is None:
             halt_probs = x.new_zeros((x.shape[0], x.shape[1], 1))
         else:
-            halt_probs = x.new_zeros((x.shape[0], 1, 1))         
+            halt_probs = x.new_zeros((x.shape[0], 1, 1))
         halted = torch.zeros_like(halt_probs, dtype=torch.bool)
         halt_probs_hist = []
         halted_hist = []
         block_halt_hist = []
-        timesteps = torch.arange(
-            max_repeats, device=x.device, 
-        ).unsqueeze(1).expand(max_repeats, x.shape[0])  # (T, B)
+        timesteps = (
+            torch.arange(
+                max_repeats,
+                device=x.device,
+            )
+            .unsqueeze(1)
+            .expand(max_repeats, x.shape[0])
+        )  # (T, B)
         for t in timesteps:
             for block in self.blocks:
                 prev_x = x.clone()
 
                 # update x
                 x, block_halt = block(x, self.timestep_embedder(t))
-                x = torch.lerp(x, prev_x, halt_probs) # = x * (1-halt_probs) + prev_x * halt_probs
+                x = torch.lerp(
+                    x, prev_x, halt_probs
+                )  # = x * (1-halt_probs) + prev_x * halt_probs
                 # update halt_probs:
                 # add-up approach:
                 # halt_probs = halt_probs + (1-halt_probs) * block_halt
@@ -656,7 +929,7 @@ class RiTHalt(nn.Module):
                 halt_probs = halted + halt_probs * ~halted
 
                 # monitor halting probabilities
-                halt_probs_hist.append(halt_probs.clone().detach()) 
+                halt_probs_hist.append(halt_probs.clone().detach())
                 halted_hist.append(halted.clone().detach())
                 block_halt_hist.append(block_halt.clone().detach())
 
@@ -676,10 +949,10 @@ class RiTHalt(nn.Module):
             "halted": halted_hist,
             "block_halt": block_halt_hist,
         }
-    
+
 
 @register_model
-def rit_d1_tiny_patch4_32(pretrained= False, **kwargs):
+def rit_d1_tiny_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -694,8 +967,9 @@ def rit_d1_tiny_patch4_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch4_64(pretrained= False, **kwargs):
+def rit_d1_tiny_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -710,8 +984,9 @@ def rit_d1_tiny_patch4_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch4_224(pretrained= False, **kwargs):
+def rit_d1_tiny_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -726,8 +1001,9 @@ def rit_d1_tiny_patch4_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch8_32(pretrained= False, **kwargs):
+def rit_d1_tiny_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -742,8 +1018,9 @@ def rit_d1_tiny_patch8_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch8_64(pretrained= False, **kwargs):
+def rit_d1_tiny_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -758,8 +1035,9 @@ def rit_d1_tiny_patch8_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch8_224(pretrained= False, **kwargs):
+def rit_d1_tiny_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -774,8 +1052,9 @@ def rit_d1_tiny_patch8_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch16_32(pretrained= False, **kwargs):
+def rit_d1_tiny_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -790,8 +1069,9 @@ def rit_d1_tiny_patch16_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch16_64(pretrained= False, **kwargs):
+def rit_d1_tiny_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -806,8 +1086,9 @@ def rit_d1_tiny_patch16_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch16_224(pretrained= False, **kwargs):
+def rit_d1_tiny_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -822,8 +1103,9 @@ def rit_d1_tiny_patch16_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch32_32(pretrained= False, **kwargs):
+def rit_d1_tiny_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -838,8 +1120,9 @@ def rit_d1_tiny_patch32_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch32_64(pretrained= False, **kwargs):
+def rit_d1_tiny_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -854,8 +1137,9 @@ def rit_d1_tiny_patch32_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_tiny_patch32_224(pretrained= False, **kwargs):
+def rit_d1_tiny_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -870,8 +1154,9 @@ def rit_d1_tiny_patch32_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch4_32(pretrained= False, **kwargs):
+def rit_d1_small_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -886,8 +1171,9 @@ def rit_d1_small_patch4_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch4_64(pretrained= False, **kwargs):
+def rit_d1_small_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -902,8 +1188,9 @@ def rit_d1_small_patch4_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch4_224(pretrained= False, **kwargs):
+def rit_d1_small_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -918,8 +1205,9 @@ def rit_d1_small_patch4_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch8_32(pretrained= False, **kwargs):
+def rit_d1_small_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -934,8 +1222,9 @@ def rit_d1_small_patch8_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch8_64(pretrained= False, **kwargs):
+def rit_d1_small_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -950,8 +1239,9 @@ def rit_d1_small_patch8_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch8_224(pretrained= False, **kwargs):
+def rit_d1_small_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -966,8 +1256,9 @@ def rit_d1_small_patch8_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch16_32(pretrained= False, **kwargs):
+def rit_d1_small_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -982,8 +1273,9 @@ def rit_d1_small_patch16_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch16_64(pretrained= False, **kwargs):
+def rit_d1_small_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -998,8 +1290,9 @@ def rit_d1_small_patch16_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch16_224(pretrained= False, **kwargs):
+def rit_d1_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1014,8 +1307,9 @@ def rit_d1_small_patch16_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch32_32(pretrained= False, **kwargs):
+def rit_d1_small_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1030,8 +1324,9 @@ def rit_d1_small_patch32_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch32_64(pretrained= False, **kwargs):
+def rit_d1_small_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1046,8 +1341,9 @@ def rit_d1_small_patch32_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_small_patch32_224(pretrained= False, **kwargs):
+def rit_d1_small_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1062,8 +1358,9 @@ def rit_d1_small_patch32_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch4_32(pretrained= False, **kwargs):
+def rit_d1_base_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1078,8 +1375,9 @@ def rit_d1_base_patch4_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch4_64(pretrained= False, **kwargs):
+def rit_d1_base_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1094,8 +1392,9 @@ def rit_d1_base_patch4_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch4_224(pretrained= False, **kwargs):
+def rit_d1_base_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1110,8 +1409,9 @@ def rit_d1_base_patch4_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch8_32(pretrained= False, **kwargs):
+def rit_d1_base_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1126,8 +1426,9 @@ def rit_d1_base_patch8_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch8_64(pretrained= False, **kwargs):
+def rit_d1_base_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1142,8 +1443,9 @@ def rit_d1_base_patch8_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch8_224(pretrained= False, **kwargs):
+def rit_d1_base_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1158,8 +1460,9 @@ def rit_d1_base_patch8_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch16_32(pretrained= False, **kwargs):
+def rit_d1_base_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1174,8 +1477,9 @@ def rit_d1_base_patch16_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch16_64(pretrained= False, **kwargs):
+def rit_d1_base_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1190,8 +1494,9 @@ def rit_d1_base_patch16_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch16_224(pretrained= False, **kwargs):
+def rit_d1_base_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1206,8 +1511,9 @@ def rit_d1_base_patch16_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch32_32(pretrained= False, **kwargs):
+def rit_d1_base_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1222,8 +1528,9 @@ def rit_d1_base_patch32_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch32_64(pretrained= False, **kwargs):
+def rit_d1_base_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1238,8 +1545,9 @@ def rit_d1_base_patch32_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_base_patch32_224(pretrained= False, **kwargs):
+def rit_d1_base_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1254,8 +1562,9 @@ def rit_d1_base_patch32_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch4_32(pretrained= False, **kwargs):
+def rit_d1_large_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1270,8 +1579,9 @@ def rit_d1_large_patch4_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch4_64(pretrained= False, **kwargs):
+def rit_d1_large_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1286,8 +1596,9 @@ def rit_d1_large_patch4_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch4_224(pretrained= False, **kwargs):
+def rit_d1_large_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1302,8 +1613,9 @@ def rit_d1_large_patch4_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch8_32(pretrained= False, **kwargs):
+def rit_d1_large_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1318,8 +1630,9 @@ def rit_d1_large_patch8_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch8_64(pretrained= False, **kwargs):
+def rit_d1_large_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1334,8 +1647,9 @@ def rit_d1_large_patch8_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch8_224(pretrained= False, **kwargs):
+def rit_d1_large_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1350,8 +1664,9 @@ def rit_d1_large_patch8_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch16_32(pretrained= False, **kwargs):
+def rit_d1_large_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1366,8 +1681,9 @@ def rit_d1_large_patch16_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch16_64(pretrained= False, **kwargs):
+def rit_d1_large_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1382,8 +1698,9 @@ def rit_d1_large_patch16_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch16_224(pretrained= False, **kwargs):
+def rit_d1_large_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1398,8 +1715,9 @@ def rit_d1_large_patch16_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch32_32(pretrained= False, **kwargs):
+def rit_d1_large_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1414,8 +1732,9 @@ def rit_d1_large_patch32_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch32_64(pretrained= False, **kwargs):
+def rit_d1_large_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1430,8 +1749,9 @@ def rit_d1_large_patch32_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_large_patch32_224(pretrained= False, **kwargs):
+def rit_d1_large_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1446,8 +1766,9 @@ def rit_d1_large_patch32_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch4_32(pretrained= False, **kwargs):
+def rit_d1_huge_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1462,8 +1783,9 @@ def rit_d1_huge_patch4_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch4_64(pretrained= False, **kwargs):
+def rit_d1_huge_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1478,8 +1800,9 @@ def rit_d1_huge_patch4_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch4_224(pretrained= False, **kwargs):
+def rit_d1_huge_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1494,8 +1817,9 @@ def rit_d1_huge_patch4_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch8_32(pretrained= False, **kwargs):
+def rit_d1_huge_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1510,8 +1834,9 @@ def rit_d1_huge_patch8_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch8_64(pretrained= False, **kwargs):
+def rit_d1_huge_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1526,8 +1851,9 @@ def rit_d1_huge_patch8_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch8_224(pretrained= False, **kwargs):
+def rit_d1_huge_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1542,8 +1868,9 @@ def rit_d1_huge_patch8_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch16_32(pretrained= False, **kwargs):
+def rit_d1_huge_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1558,8 +1885,9 @@ def rit_d1_huge_patch16_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch16_64(pretrained= False, **kwargs):
+def rit_d1_huge_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1574,8 +1902,9 @@ def rit_d1_huge_patch16_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch16_224(pretrained= False, **kwargs):
+def rit_d1_huge_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1590,8 +1919,9 @@ def rit_d1_huge_patch16_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch32_32(pretrained= False, **kwargs):
+def rit_d1_huge_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=32,
@@ -1606,8 +1936,9 @@ def rit_d1_huge_patch32_32(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch32_64(pretrained= False, **kwargs):
+def rit_d1_huge_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=64,
@@ -1622,8 +1953,9 @@ def rit_d1_huge_patch32_64(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rit_d1_huge_patch32_224(pretrained= False, **kwargs):
+def rit_d1_huge_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
         image_size=224,
@@ -1638,8 +1970,9 @@ def rit_d1_huge_patch32_224(pretrained= False, **kwargs):
         dropout=0,
     )
 
+
 @register_model
-def rith_d1_tiny_patch4_32(pretrained= False, **kwargs):
+def rith_d1_tiny_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -1656,8 +1989,9 @@ def rith_d1_tiny_patch4_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_tiny_patch4_64(pretrained= False, **kwargs):
+def rith_d1_tiny_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -1674,8 +2008,9 @@ def rith_d1_tiny_patch4_64(pretrained= False, **kwargs):
         halt_pool=None,
     )
 
+
 @register_model
-def rith_d1_tiny_patch4_224(pretrained= False, **kwargs):
+def rith_d1_tiny_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -1692,8 +2027,9 @@ def rith_d1_tiny_patch4_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_tiny_patch8_32(pretrained= False, **kwargs):
+def rith_d1_tiny_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -1710,8 +2046,9 @@ def rith_d1_tiny_patch8_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_tiny_patch8_64(pretrained= False, **kwargs):
+def rith_d1_tiny_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -1728,8 +2065,9 @@ def rith_d1_tiny_patch8_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_tiny_patch8_224(pretrained= False, **kwargs):
+def rith_d1_tiny_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -1746,8 +2084,9 @@ def rith_d1_tiny_patch8_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_tiny_patch16_32(pretrained= False, **kwargs):
+def rith_d1_tiny_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -1764,8 +2103,9 @@ def rith_d1_tiny_patch16_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_tiny_patch16_64(pretrained= False, **kwargs):
+def rith_d1_tiny_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -1782,8 +2122,9 @@ def rith_d1_tiny_patch16_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_tiny_patch16_224(pretrained= False, **kwargs):
+def rith_d1_tiny_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -1800,8 +2141,9 @@ def rith_d1_tiny_patch16_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_tiny_patch32_32(pretrained= False, **kwargs):
+def rith_d1_tiny_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -1818,8 +2160,9 @@ def rith_d1_tiny_patch32_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_tiny_patch32_64(pretrained= False, **kwargs):
+def rith_d1_tiny_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -1836,8 +2179,9 @@ def rith_d1_tiny_patch32_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_tiny_patch32_224(pretrained= False, **kwargs):
+def rith_d1_tiny_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -1854,8 +2198,9 @@ def rith_d1_tiny_patch32_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch4_32(pretrained= False, **kwargs):
+def rith_d1_small_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -1872,8 +2217,9 @@ def rith_d1_small_patch4_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch4_64(pretrained= False, **kwargs):
+def rith_d1_small_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -1890,8 +2236,9 @@ def rith_d1_small_patch4_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch4_224(pretrained= False, **kwargs):
+def rith_d1_small_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -1908,8 +2255,9 @@ def rith_d1_small_patch4_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch8_32(pretrained= False, **kwargs):
+def rith_d1_small_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -1926,8 +2274,9 @@ def rith_d1_small_patch8_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch8_64(pretrained= False, **kwargs):
+def rith_d1_small_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -1944,8 +2293,9 @@ def rith_d1_small_patch8_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch8_224(pretrained= False, **kwargs):
+def rith_d1_small_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -1962,8 +2312,9 @@ def rith_d1_small_patch8_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch16_32(pretrained= False, **kwargs):
+def rith_d1_small_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -1980,8 +2331,9 @@ def rith_d1_small_patch16_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch16_64(pretrained= False, **kwargs):
+def rith_d1_small_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -1998,8 +2350,9 @@ def rith_d1_small_patch16_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch16_224(pretrained= False, **kwargs):
+def rith_d1_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2016,8 +2369,9 @@ def rith_d1_small_patch16_224(pretrained= False, **kwargs):
         halt_pool=None,
     )
 
+
 @register_model
-def rith_d1_small_patch32_32(pretrained= False, **kwargs):
+def rith_d1_small_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2034,8 +2388,9 @@ def rith_d1_small_patch32_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch32_64(pretrained= False, **kwargs):
+def rith_d1_small_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2052,8 +2407,9 @@ def rith_d1_small_patch32_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_small_patch32_224(pretrained= False, **kwargs):
+def rith_d1_small_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2070,8 +2426,9 @@ def rith_d1_small_patch32_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch4_32(pretrained= False, **kwargs):
+def rith_d1_base_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2088,8 +2445,9 @@ def rith_d1_base_patch4_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch4_64(pretrained= False, **kwargs):
+def rith_d1_base_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2106,8 +2464,9 @@ def rith_d1_base_patch4_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch4_224(pretrained= False, **kwargs):
+def rith_d1_base_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2124,8 +2483,9 @@ def rith_d1_base_patch4_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch8_32(pretrained= False, **kwargs):
+def rith_d1_base_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2142,8 +2502,9 @@ def rith_d1_base_patch8_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch8_64(pretrained= False, **kwargs):
+def rith_d1_base_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2160,8 +2521,9 @@ def rith_d1_base_patch8_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch8_224(pretrained= False, **kwargs):
+def rith_d1_base_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2178,8 +2540,9 @@ def rith_d1_base_patch8_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch16_32(pretrained= False, **kwargs):
+def rith_d1_base_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2196,8 +2559,9 @@ def rith_d1_base_patch16_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch16_64(pretrained= False, **kwargs):
+def rith_d1_base_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2214,8 +2578,9 @@ def rith_d1_base_patch16_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch16_224(pretrained= False, **kwargs):
+def rith_d1_base_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2232,8 +2597,9 @@ def rith_d1_base_patch16_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch32_32(pretrained= False, **kwargs):
+def rith_d1_base_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2250,8 +2616,9 @@ def rith_d1_base_patch32_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch32_64(pretrained= False, **kwargs):
+def rith_d1_base_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2268,8 +2635,9 @@ def rith_d1_base_patch32_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_base_patch32_224(pretrained= False, **kwargs):
+def rith_d1_base_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2286,8 +2654,9 @@ def rith_d1_base_patch32_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch4_32(pretrained= False, **kwargs):
+def rith_d1_large_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2304,8 +2673,9 @@ def rith_d1_large_patch4_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch4_64(pretrained= False, **kwargs):
+def rith_d1_large_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2322,8 +2692,9 @@ def rith_d1_large_patch4_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch4_224(pretrained= False, **kwargs):
+def rith_d1_large_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2340,8 +2711,9 @@ def rith_d1_large_patch4_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch8_32(pretrained= False, **kwargs):
+def rith_d1_large_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2358,8 +2730,9 @@ def rith_d1_large_patch8_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch8_64(pretrained= False, **kwargs):
+def rith_d1_large_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2376,8 +2749,9 @@ def rith_d1_large_patch8_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch8_224(pretrained= False, **kwargs):
+def rith_d1_large_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2394,8 +2768,9 @@ def rith_d1_large_patch8_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch16_32(pretrained= False, **kwargs):
+def rith_d1_large_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2412,8 +2787,9 @@ def rith_d1_large_patch16_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch16_64(pretrained= False, **kwargs):
+def rith_d1_large_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2430,8 +2806,9 @@ def rith_d1_large_patch16_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch16_224(pretrained= False, **kwargs):
+def rith_d1_large_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2448,8 +2825,9 @@ def rith_d1_large_patch16_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch32_32(pretrained= False, **kwargs):
+def rith_d1_large_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2466,8 +2844,9 @@ def rith_d1_large_patch32_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch32_64(pretrained= False, **kwargs):
+def rith_d1_large_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2484,8 +2863,9 @@ def rith_d1_large_patch32_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_large_patch32_224(pretrained= False, **kwargs):
+def rith_d1_large_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2502,8 +2882,9 @@ def rith_d1_large_patch32_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch4_32(pretrained= False, **kwargs):
+def rith_d1_huge_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2520,8 +2901,9 @@ def rith_d1_huge_patch4_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch4_64(pretrained= False, **kwargs):
+def rith_d1_huge_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2538,8 +2920,9 @@ def rith_d1_huge_patch4_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch4_224(pretrained= False, **kwargs):
+def rith_d1_huge_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2556,8 +2939,9 @@ def rith_d1_huge_patch4_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch8_32(pretrained= False, **kwargs):
+def rith_d1_huge_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2574,8 +2958,9 @@ def rith_d1_huge_patch8_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch8_64(pretrained= False, **kwargs):
+def rith_d1_huge_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2592,8 +2977,9 @@ def rith_d1_huge_patch8_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch8_224(pretrained= False, **kwargs):
+def rith_d1_huge_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2610,8 +2996,9 @@ def rith_d1_huge_patch8_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch16_32(pretrained= False, **kwargs):
+def rith_d1_huge_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2628,8 +3015,9 @@ def rith_d1_huge_patch16_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch16_64(pretrained= False, **kwargs):
+def rith_d1_huge_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2646,8 +3034,9 @@ def rith_d1_huge_patch16_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch16_224(pretrained= False, **kwargs):
+def rith_d1_huge_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2664,8 +3053,9 @@ def rith_d1_huge_patch16_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch32_32(pretrained= False, **kwargs):
+def rith_d1_huge_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=32,
@@ -2682,8 +3072,9 @@ def rith_d1_huge_patch32_32(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch32_64(pretrained= False, **kwargs):
+def rith_d1_huge_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2700,8 +3091,9 @@ def rith_d1_huge_patch32_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d1_huge_patch32_224(pretrained= False, **kwargs):
+def rith_d1_huge_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2720,7 +3112,7 @@ def rith_d1_huge_patch32_224(pretrained= False, **kwargs):
 
 
 @register_model
-def rith_d3_tiny_patch4_64(pretrained= False, **kwargs):
+def rith_d3_tiny_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=64,
@@ -2737,8 +3129,9 @@ def rith_d3_tiny_patch4_64(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def rith_d3_small_patch16_224(pretrained= False, **kwargs):
+def rith_d3_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
         image_size=224,
@@ -2755,8 +3148,9 @@ def rith_d3_small_patch16_224(pretrained= False, **kwargs):
         halt_pool="cls",
     )
 
+
 @register_model
-def srit_d1_tiny_patch16_224(pretrained= False, **kwargs):
+def srit_d1_tiny_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT(
         image_size=224,
@@ -2765,80 +3159,168 @@ def srit_d1_tiny_patch16_224(pretrained= False, **kwargs):
         num_classes=kwargs["num_classes"],
         dim=192,
         heads=3,
+        depth=1,
+        repeats=50,
+        mlp_ratio=4.0,
+        halt_threshold=1,
+        halt=None,
+        halt_noise_scale=1,
+        normalize=False,
+    )
+
+
+@register_model
+def srit_d1_small_patch16_224(pretrained=False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=1,
+        repeats=12,
+        mlp_ratio=4.0,
+        halt_threshold=1,
+        # halt="classify",
+        halt=None,
+        halt_noise_scale=0,
+    )
+
+
+@register_model
+def srit_d3_small_patch16_224(pretrained=False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
+        depth=3,
+        repeats=4,
+        mlp_ratio=4.0,
+        halt_threshold=0.95,
+        halt="ema",
+    )
+
+
+@register_model
+def srit_d1_base_patch16_224(pretrained=False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=1,
+        repeats=12,
+        mlp_ratio=4.0,
+        halt_threshold=1,
+        halt="classify",
+        halt_noise_scale=0,
+    )
+
+
+@register_model
+def srit_d3_base_patch16_224(pretrained=False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=768,
+        heads=12,
+        depth=3,
+        repeats=4,
+        mlp_ratio=4.0,
+        halt_threshold=0.95,
+        halt="ema",
+    )
+
+
+@register_model
+def srit2_d1_small_patch16_224(pretrained=False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT2(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=384,
+        heads=6,
         depth=1,
         repeats=12,
         mlp_ratio=4.0,
         halt_threshold=1,
         halt="classify",
         halt_noise_scale=1,
+        stochastic_depth=False,
+        extra_step=True,
     )
 
 @register_model
-def srit_d1_small_patch16_224(pretrained= False, **kwargs):
+def srit2_d1_tiny_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
-    return SimpleRiT(
+    return SimpleRiT2(
         image_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
-        dim=384,
-        heads=6,
+        dim=192,
+        heads=3,
         depth=1,
         repeats=50,
         mlp_ratio=4.0,
         halt_threshold=1,
         halt="classify",
+        halt_noise_scale=1,
+        stochastic_depth=True,
+        extra_step=False,
+    )
+
+
+@register_model
+def srit3_d1_tiny_patch16_224(pretrained=False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT3(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=1,
+        repeats=20,
+        mlp_ratio=4.0,
+        halt_threshold=1,
+        halt=None,
         halt_noise_scale=0,
+        stochastic_depth=False,
+        extra_step=False,
     )
 
 @register_model
-def srit_d3_small_patch16_224(pretrained= False, **kwargs):
+def srit3_d1_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
-    return SimpleRiT(
+    return SimpleRiT3(
         image_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
         dim=384,
         heads=6,
-        depth=3,
-        repeats=4,
-        mlp_ratio=4.0,
-        halt_threshold=0.95,
-        halt="ema",
-    )
-
-@register_model
-def srit_d1_base_patch16_224(pretrained= False, **kwargs):
-    assert not pretrained, "Pretrained models not available for this model."
-    return SimpleRiT(
-        image_size=224,
-        patch_size=16,
-        channels=3,
-        num_classes=kwargs["num_classes"],
-        dim=768,
-        heads=12,
         depth=1,
         repeats=12,
         mlp_ratio=4.0,
         halt_threshold=1,
-        halt="classify",        
+        halt=None,
         halt_noise_scale=0,
-    )
-
-@register_model
-def srit_d3_base_patch16_224(pretrained= False, **kwargs):
-    assert not pretrained, "Pretrained models not available for this model."
-    return SimpleRiT(
-        image_size=224,
-        patch_size=16,
-        channels=3,
-        num_classes=kwargs["num_classes"],
-        dim=768,
-        heads=12,
-        depth=3,
-        repeats=4,
-        mlp_ratio=4.0,
-        halt_threshold=0.95,
-        halt="ema",
+        stochastic_depth=False,
+        extra_step=False,
     )

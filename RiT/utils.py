@@ -5,7 +5,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 
-from RiT.criterions import LabelSmoothingCrossEntropyLoss, MarginLoss, LabelSmoothingCrossEntropyLossIterations
+from RiT.criterions import MarginLoss, WeightedCrossEntropyLoss, FixedpointWeightedCrossEntropyLoss
 from RiT.lr_schedulers import GradualWarmupScheduler, StopScheduler
 
 
@@ -34,19 +34,13 @@ def get_layer_outputs(model, input):
 
 def get_criterion(args):
     if args.criterion == "ce":
-        if args.label_smoothing:
-            if args.iteration_loss:
-                criterion = LabelSmoothingCrossEntropyLossIterations(
-                    args.num_classes, smoothing=args.smoothing
-                )
-            else:
-                criterion = LabelSmoothingCrossEntropyLoss(
-                    args.num_classes, smoothing=args.smoothing
-                )
-        else:
-            criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     elif args.criterion == "margin":
         criterion = MarginLoss(m_pos=0.9, m_neg=0.1, lambda_=0.5)
+    elif args.criterion == "wce":
+        criterion = WeightedCrossEntropyLoss(label_smoothing=args.label_smoothing)
+    elif args.criterion == "fwce":
+        criterion = FixedpointWeightedCrossEntropyLoss(label_smoothing=args.label_smoothing)
     else:
         raise ValueError(f"Criterion {args.criterion} not implemented.")
 

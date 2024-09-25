@@ -10,7 +10,7 @@ from RiT.models import *
 from RiT.utils import get_criterion, get_scheduler, get_layer_outputs
 from RiT.augmentation import CutMix, MixUp
 
-from RiT.models.repeat_transformer import RiTHalt
+from RiT.models.repeat_transformer import RiTHalt, SimpleRiT2
 import matplotlib.pyplot as plt
 
 class Net(pl.LightningModule):
@@ -57,9 +57,9 @@ class Net(pl.LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def calculate_loss(self, out, label):
-        if self.hparams.iteration_loss:
-            return self.criterion(out, label, self.model.iterations, self.model.max_repeats * self.model.depth)
+    def calculate_loss(self, out, label, **kwargs):
+        if self.hparams.criterion in ["fwce", "wce"]:
+            return self.criterion(out, label, kwargs["confidences"])
         return self.criterion(out, label)
 
     def configure_optimizers(self):
@@ -122,12 +122,29 @@ class Net(pl.LightningModule):
         if self.hparams.cutmix or self.hparams.mixup:
             img, label, rand_label, lambda_ = self.cutmix_mixup(img, label)
             out = self(img)
-            loss = (self.calculate_loss(out, label) * lambda_) + (
-                self.calculate_loss(out, rand_label) * (1.0 - lambda_)
+            if type(out) == dict:
+                if "confidences" in out:
+                    confidences = out["confidences"]
+                    out = out["logits"]
+                else:
+                    confidences = None
+                    out = out["logits"][-1]
+            else:
+                confidences = None
+            loss = (self.calculate_loss(out, label, confidences=confidences) * lambda_) + (
+                self.calculate_loss(out, rand_label, confidences=confidences) * (1.0 - lambda_)
             )
         else:
-            out = self(img)
-            loss = self.calculate_loss(out, label)
+            if type(out) == dict:
+                if "confidences" in out:
+                    confidences = out["confidences"]
+                    out = out["logits"]
+                else:
+                    confidences = None
+                    out = out["logits"][-1]
+            else:
+                confidences = None
+            loss = self.calculate_loss(out, label, confidences=confidences)
 
         return out, loss
 
@@ -162,31 +179,55 @@ class Net(pl.LightningModule):
         if self.hparams.log_layer_outputs:
             self.log_layer_outputs()
 
+        # DELETE LATER
         if hasattr(self.model, "halt_noise_scale"):
-            if self.model.halt_noise_scale != 0:
-                self.model.halt_noise_scale = (5-1) * self.current_epoch / (self.trainer.max_epochs ) + 1
-            self.log("halt_noise_scale", self.model.halt_noise_scale)
+            try:
+                if self.model.halt_noise_scale != 0:
+                    self.model.halt_noise_scale = (5-1) * self.current_epoch / (self.trainer.max_epochs ) + 1
+                self.log("halt_noise_scale", self.model.halt_noise_scale)
 
-        with torch.no_grad():
-            res = self.model.inference(self._sample_input_data,
-                                    repeats= self.model.repeats,
-                                    halt="classify",
-                                    halt_threshold=self.model.halt_threshold,
-                                    ema_alpha=0.5,
-                                    halt_noise_scale=self.model.halt_noise_scale,
-                                    )
-            block_halt = torch.stack(res['block_halt'])[...,0]
-            plt.figure(figsize=(10, 6))
-            plt.plot(block_halt.cpu().numpy())
-            plt.title(f"Block Halt, epoch: {self.current_epoch}")
-            plt.savefig("block_halt.png")
-            plt.clf()
-            # log to wandb
-            if isinstance(self.logger, pl.loggers.WandbLogger):
-                self.logger.experiment.log(
-                    {"Block Halt": wandb.Image("block_halt.png")},
-                    step=self.global_step,
-                )
+                with torch.no_grad():
+                    res = self.model.inference(self._sample_input_data,
+                                            repeats= self.model.repeats,
+                                            halt="classify",
+                                            halt_threshold=self.model.halt_threshold,
+                                            ema_alpha=0.5,
+                                            halt_noise_scale=self.model.halt_noise_scale,
+                                            )
+                    block_halt = torch.stack(res['block_halt'])[...,0]
+                    plt.figure(figsize=(10, 6))
+                    plt.plot(block_halt.cpu().numpy())
+                    plt.title(f"Block Halt, epoch: {self.current_epoch}")
+                    plt.savefig("block_halt.png")
+                    plt.clf()
+                    # log to wandb
+                    if isinstance(self.logger, pl.loggers.WandbLogger):
+                        self.logger.experiment.log(
+                            {"Block Halt": wandb.Image("block_halt.png")},
+                            step=self.global_step,
+                        )
+
+                if isinstance(self.model, SimpleRiT2):
+                    with torch.no_grad():
+                        out = self.model(self._sample_input_data)
+                        plt.figure(figsize=(10, 6))
+                        plt.plot(out["confidences"].cpu().numpy())
+                        plt.title(f"Confidences, epoch: {self.current_epoch}")
+                        plt.savefig("confidences.png")
+                        plt.clf()
+                        # log to wandb
+                        if isinstance(self.logger, pl.loggers.WandbLogger):
+                            self.logger.experiment.log(
+                                {"Confidences": wandb.Image("confidences.png")},
+                                step=self.global_step,
+                            )
+                            self.logger.experiment.log(
+                                {"Average Confidence": out["confidences"].argmax(0).float().mean().item()},
+                                step=self.global_step,
+                                )
+            except Exception as e:
+                print(f"[ERROR] {e}")
+                        
 
     def optimizer_step(self, *args, **kwargs):
         """
@@ -202,7 +243,18 @@ class Net(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         img, label = batch
         out = self(img)
-        loss = self.calculate_loss(out, label)
+        if type(out) == dict:
+            if "confidences" in out:
+                confidences = out["confidences"]
+                out = out["logits"]
+            else:
+                confidences = None
+                out = out["logits"][-1]
+        else:
+            confidences = None
+        loss = self.calculate_loss(out, label, confidences=confidences)
+        if out.dim() == 3:
+            out = out[confidences.argmax(0)]
         acc = torch.eq(out.argmax(-1), label).float().mean()
         self.log("val_loss", loss)
         self.log("val_acc", acc)

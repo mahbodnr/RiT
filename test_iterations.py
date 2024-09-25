@@ -101,7 +101,6 @@ with torch.no_grad():
     correct_preds_halt = 0
     count = 0
     for img, label in test_dl:
-        img, label = next(iter(test_dl))
         img, label = img.to(device), label.to(device)
         res = net.model.inference(img,
                                 repeats= 12,
@@ -117,6 +116,7 @@ with torch.no_grad():
         count += len(label)
         layer_outputs = torch.stack(res["layer_outputs"]).squeeze(0)
         halted_outputs = []
+        print((block_halt<0.99).sum(0).float().mean())
         for i, l in enumerate((block_halt<0.99).sum(0).int()):
             halted_outputs.append(layer_outputs[l, i])
         halted_outputs = torch.stack(halted_outputs)

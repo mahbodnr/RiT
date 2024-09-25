@@ -82,9 +82,8 @@ parser.add_argument(
 # Augmentation
 parser.add_argument("--autoaugment", action="store_true")
 parser.add_argument("--randaugment", action="store_true")
-parser.add_argument("--criterion", default="ce", type=str, choices=["ce", "margin"])
-parser.add_argument("--label-smoothing", action="store_true")
-parser.add_argument("--smoothing", default=0.1, type=float)
+parser.add_argument("--criterion", default="ce", type=str, choices=["ce", "margin", "wce", "fwce"])
+parser.add_argument("--label-smoothing", default=0.0, type=float)
 parser.add_argument("--rcpaste", action="store_true")
 parser.add_argument("--cutmix", action="store_true")
 parser.add_argument("--cutmix-beta", default=1.0, type=float)

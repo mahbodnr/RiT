@@ -16,7 +16,7 @@ parser.add_argument(
 )
 """
 
-model_path= r"model_checkpoints/rith_d1_base_patch4_32_cifar10_sibla_20240831122944.ckpt"
+model_path= r"model_checkpoints/rith_d1_small_patch16_224_tiny-imagenet_pbtqq_20240905194647.ckpt"
 state = torch.load(model_path)
 trainer = pl.Trainer()
 args = argparse.Namespace(**state["hyper_parameters"])
