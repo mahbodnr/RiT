@@ -30,9 +30,12 @@ def train(args):
 
 
     train_dl, val_dl = get_dataloader(args)
-    args._sample_input_data = next(iter(train_dl))[0][0:10].to(
-        "cuda" if args.gpus else "cpu"
+    args._sample_input_data, args._sample_input_label = next(
+        iter(train_dl)
     )
+    args._sample_input_data = args._sample_input_data.to("cuda" if args.gpus else "cpu")
+    args._sample_input_label = args._sample_input_label.to("cuda" if args.gpus else "cpu")
+
 
 
     print("Arguments:")

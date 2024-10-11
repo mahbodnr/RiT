@@ -1,16 +1,92 @@
-from typing import Any, Callable, Dict, Optional, Sequence, Set, Tuple, Type, Union, List, Literal
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Type,
+    Union,
+    List,
+    Literal,
+)
 from functools import partial
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.jit import Final
 
-from timm.models.vision_transformer import VisionTransformer, Attention
+from timm.models.vision_transformer import VisionTransformer
 from timm.models.registry import register_model
-from timm.layers import PatchEmbed, Mlp, LayerType, get_act_layer, get_norm_layer
+from timm.layers import (
+    PatchEmbed,
+    Mlp,
+    LayerType,
+    get_act_layer,
+    get_norm_layer,
+    use_fused_attn,
+)
 
 from torchdeq import get_deq
 from torchdeq.norm import apply_norm, reset_norm
+
+
+
+class Attention(nn.Module):
+    fused_attn: Final[bool]
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        norm_layer: nn.Module = nn.LayerNorm,
+    ) -> None:
+        super().__init__()
+        assert dim % num_heads == 0, f"dim should be divisible by num_heads. {dim} % {num_heads} != 0"
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim**-0.5
+        self.fused_attn = use_fused_attn()
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, N, C = x.shape
+        qkv = (
+            self.qkv(x)
+            .reshape(B, N, 3, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
+        q, k, v = qkv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q,k,v,
+                dropout_p=self.attn_drop.p if self.training else 0.0,
+            )
+        else:
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 
 class Block(nn.Module):
@@ -51,12 +127,61 @@ class Block(nn.Module):
             drop=proj_drop,
         )
 
-    def forward(self, x: torch.Tensor, injection:Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        raise NotImplementedError()
+    
+class BlockBase(Block):
+    def forward(
+        self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         x = x + self.attn(x)
         x = x + self.mlp(self.norm1(x))
         x = self.norm2(x)
         return x
 
+class BlockPreNorm(Block):
+    def forward(
+        self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        x = self.norm1(x)
+        x = x + self.attn(x)
+        x = self.norm2(x)
+        x = x + self.mlp(x)
+        return x
+
+class BlockPreNormAdd(Block):
+    def forward(
+        self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        x = x + injection
+        x = self.norm1(x)
+        x = x + self.attn(x)
+        x = self.norm2(x)
+        x = x + self.mlp(x)
+        return x
+
+class BlockAdd(Block):
+    def forward(
+        self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        x = x + injection
+        x = x + self.attn(x)
+        x = x + self.mlp(self.norm1(x))
+        x = self.norm2(x)
+        return x
+    
+class BlockAttn(Block):
+    def forward(
+        self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        x = torch.cat([x, injection], dim=1)
+        x = x + self.attn(x)
+        x = x[:, :-injection.shape[1]]
+        x = x + self.mlp(self.norm1(x))
+        x = self.norm2(x)
+        return x
 
 class Transit(VisionTransformer):
     """
@@ -73,7 +198,7 @@ class Transit(VisionTransformer):
         num_classes: int = 1000,
         global_pool: Literal["", "avg", "token", "map"] = "token",
         embed_dim: int = 768,
-        depth: int = 12,
+        depth: int = 1,
         num_heads: int = 12,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = True,
@@ -82,7 +207,7 @@ class Transit(VisionTransformer):
         class_token: bool = True,
         no_embed_class: bool = False,
         reg_tokens: int = 0,
-        pre_norm: bool = True, # Different from original ViT
+        pre_norm: bool = False, 
         fc_norm: Optional[bool] = None,
         dynamic_img_size: bool = False,
         dynamic_img_pad: bool = False,
@@ -100,6 +225,7 @@ class Transit(VisionTransformer):
         block_fn: Type[nn.Module] = Block,
         mlp_layer: Type[nn.Module] = Mlp,
         # DEQ specific args
+        z_init_type: str = "zero",
         f_solver: str = "fixed_point_iter",
         b_solver: str = "fixed_point_iter",
         no_stat: Optional[bool] = None,
@@ -122,6 +248,7 @@ class Transit(VisionTransformer):
         norm_type: Optional[str] = "weight_norm",
         prefix_filter_out: Optional[Union[str, List[str]]] = None,
         filter_out: Optional[Union[str, List[str]]] = None,
+        logger=None,
         **kwargs: Any,
     ) -> None:
         """
@@ -222,7 +349,9 @@ class Transit(VisionTransformer):
         )
         assert drop_path_rate == 0, "drop path not supported in Vision Transformer"
         assert init_values is None, "init values not supported in Vision Transformer"
-        use_fc_norm = global_pool == 'avg' if fc_norm is None else fc_norm
+        assert z_init_type in ("zero", "input"), "Invalid z_init_type"
+        self.logger = logger
+        self.z_init_type = z_init_type
         norm_layer = get_norm_layer(norm_layer) or partial(nn.LayerNorm, eps=1e-6)
         act_layer = get_act_layer(act_layer) or nn.GELU
 
@@ -246,6 +375,7 @@ class Transit(VisionTransformer):
             ]
         )
 
+        self.injection_transform = nn.Linear(embed_dim, embed_dim)
         self.deq = get_deq(
             f_solver=f_solver,
             b_solver=b_solver,
@@ -275,6 +405,24 @@ class Transit(VisionTransformer):
             filter_out=filter_out,
         )
 
+    def deq_forward_writer(self, info):
+        if self.logger is not None:
+            for key in ("abs_lowest", "rel_lowest", "nstep"):
+                if key == "nstep" and info[key].mean() == 0:
+                    continue
+                if info[key].mean() == 1e8:
+                    continue
+                self.logger(
+                    f"Forward/{key}", info[key].mean()
+                )
+
+    def deq_backward_writer(self, info):
+        if self.logger is not None:
+            for key in ("abs_lowest", "rel_lowest", "nstep"):
+                self.logger(
+                    f"Backward/{key}", info[key].mean()
+                )
+
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable: bool = True) -> None:
         raise NotImplementedError("grad_checkpointing is not available for DEQ models")
@@ -291,18 +439,34 @@ class Transit(VisionTransformer):
         raise NotImplementedError("Not Implemented Yet for DEQ")
 
     def _init_z(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.zeros_like(x) # TODO: add trainable init
+        if self.z_init_type == "zero":
+            return torch.zeros_like(x)
+        elif self.z_init_type == "input":
+            return x
+
+    def injection(self, x: torch.Tensor) -> torch.Tensor:
+        return self.injection_transform(x)
 
     def run_deq(self, x: torch.Tensor) -> torch.Tensor:
         reset_norm(self.blocks)
-        u_inj = x
+        u_inj = self.injection(x)
+
         def deq_func(z):
             for block in self.blocks:
-                z = block(z, injection= u_inj)
+                z = block(z, injection=u_inj)
             return z
+
         z_init = self._init_z(x)
-        z, info = self.deq(deq_func, z_init, writer=None) # TODO: Add writer
-        return z[0]
+        z, info = self.deq(deq_func, z_init, writer=self.deq_backward_writer)
+        self.deq_forward_writer(info)
+        assert len(z) == 1 # DELETE LATER
+        return z[-1]
+
+        # z = self._init_z(x)
+        # for t in range(self.deq.f_max_iter):
+        #     for block in self.blocks:
+        #         z = block(z, injection=u_inj)
+        # return z
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)
@@ -319,6 +483,14 @@ class Transit(VisionTransformer):
         return x
 
 
+_blocks = {
+    "base": BlockBase,
+    "prenorm": BlockPreNorm,
+    "prenorm_add": BlockPreNormAdd,
+    "add": BlockAdd,
+    "attn": BlockAttn,
+}
+
 @register_model
 def transit_tiny_patch16_224(
     num_classes: int = 1000,
@@ -330,11 +502,45 @@ def transit_tiny_patch16_224(
         img_size=224,
         patch_size=16,
         embed_dim=192,
-        depth=1,
         num_heads=3,
         mlp_ratio=4.0,
-        qkv_bias=True,
-        qk_norm=False,
         num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
+
+@register_model
+def transit_small_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> Transit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return Transit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=384,
+        num_heads=6,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
+
+@register_model
+def transit_base_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> Transit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return Transit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=768,
+        num_heads=12,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
         **kwargs,
     )

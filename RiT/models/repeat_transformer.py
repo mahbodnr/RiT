@@ -8,6 +8,7 @@ from timm.models.registry import register_model
 
 from timm.models.vision_transformer import Block as ViTBlock
 
+from torchdeq.norm import apply_norm, reset_norm
 
 class TimestepEmbedder(nn.Module):
     """
@@ -484,11 +485,11 @@ class SimpleRiT2(SimpleRiT):
                 if self.normalize:
                     x = (x - x.mean(dim=(-1, -2), keepdim=True)) / x.std(
                         dim=(-1, -2), keepdim=True)
-                block_halt = self.halt_block(x[:, -1])
+                # block_halt = self.halt_block(x[:, -1])
                 # block_halt = torch.sigmoid(block_halt + self.halt_noise_scale * torch.randn_like(block_halt))
                 block_outputs.append(x.clone().detach()) # DELETE LATER
                 outputs.append(self.classify(x))
-                confidences.append(block_halt.squeeze(-1))
+                # confidences.append(block_halt.squeeze(-1))
 
         if self.extra_step:
             x = block(x)
@@ -499,13 +500,13 @@ class SimpleRiT2(SimpleRiT):
 
         block_outputs = torch.stack(block_outputs) # DELETE LATER
         outputs = torch.stack(outputs)
-        confidences = torch.stack(confidences)
-        confidences = F.softmax(confidences, dim=0)
-        confidences = torch.cumsum(confidences, dim=0)
+        # confidences = torch.stack(confidences)
+        # confidences = F.softmax(confidences, dim=0)
+        # confidences = torch.cumsum(confidences, dim=0)
 
         return {
             "logits": outputs,  # (N, B, C)
-            "confidences": confidences,  # (N, B)
+            # "confidences": confidences,  # (N, B)
             "block_outputs": block_outputs,  # DELETE LATER
         }
 
@@ -547,6 +548,7 @@ class ViTBlockIm(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, inj=None) -> torch.Tensor:
+        x = x + inj
         x = x + self.attn(x)
         x = x + self.mlp(self.norm1(x))
         x = self.norm2(x)
@@ -609,6 +611,12 @@ class SimpleRiT3(SimpleRiT):
                 for _ in range(depth)
             ]
         )
+        if normalize:
+            apply_norm(
+                self.blocks, 
+                # "weight_norm",
+                norm_type = "none",
+            )
 
 
 
@@ -627,6 +635,7 @@ class SimpleRiT3(SimpleRiT):
         outputs = []
         block_outputs = [] # DELETE LATER
         z = torch.zeros_like(x)
+        reset_norm(self.blocks)
 
         if self.stochastic_depth:
             repeats = (
@@ -639,7 +648,7 @@ class SimpleRiT3(SimpleRiT):
             repeats = self.repeats
         for t in range(repeats):
             for block in self.blocks:
-                z = block(z + injection)
+                z = block(z, injection)
                 block_outputs.append(z.clone().detach()) # DELETE LATER
                 outputs.append(self.classify(z))
 
@@ -3275,12 +3284,12 @@ def srit2_d1_tiny_patch16_224(pretrained=False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        repeats=50,
+        repeats=12,
         mlp_ratio=4.0,
         halt_threshold=1,
         halt="classify",
         halt_noise_scale=1,
-        stochastic_depth=True,
+        stochastic_depth=False,
         extra_step=False,
     )
 
@@ -3296,7 +3305,7 @@ def srit3_d1_tiny_patch16_224(pretrained=False, **kwargs):
         dim=192,
         heads=3,
         depth=1,
-        repeats=20,
+        repeats=12,
         mlp_ratio=4.0,
         halt_threshold=1,
         halt=None,
@@ -3317,6 +3326,26 @@ def srit3_d1_small_patch16_224(pretrained=False, **kwargs):
         heads=6,
         depth=1,
         repeats=12,
+        mlp_ratio=4.0,
+        halt_threshold=1,
+        halt=None,
+        halt_noise_scale=0,
+        stochastic_depth=False,
+        extra_step=False,
+    )
+
+@register_model
+def srit3_d12_tiny_patch16_224(pretrained=False, **kwargs):
+    assert not pretrained, "Pretrained models not available for this model."
+    return SimpleRiT3(
+        image_size=224,
+        patch_size=16,
+        channels=3,
+        num_classes=kwargs["num_classes"],
+        dim=192,
+        heads=3,
+        depth=12,
+        repeats=1,
         mlp_ratio=4.0,
         halt_threshold=1,
         halt=None,

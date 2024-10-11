@@ -2,6 +2,7 @@ import time
 import pytorch_lightning as pl
 import torch
 import wandb
+from tqdm import tqdm
 
 from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.models import create_model
@@ -13,26 +14,95 @@ from RiT.augmentation import CutMix, MixUp
 from RiT.models.repeat_transformer import RiTHalt, SimpleRiT2
 import matplotlib.pyplot as plt
 
+
 class Net(pl.LightningModule):
     def __init__(self, hparams):
         super(Net, self).__init__()
         if hasattr(hparams, "_sample_input_data"):
             self._sample_input_data = hparams._sample_input_data
             del hparams._sample_input_data
+            self._sample_input_label = hparams._sample_input_label
+            del hparams._sample_input_label
         self.hparams.update(vars(hparams))
         self.save_hyperparameters(
             ignore=[key for key in self.hparams.keys() if key[0] == "_"]
         )
-        self.model = create_model(
-            model_name= hparams.model_name,
-            pretrained= hparams.pretrained,
-            num_classes= hparams.num_classes,
-            # TODO: add pretrained arguments:
-            # pretrained_cfg = None,
-            # pretrained_cfg_overlay = None,
-            # checkpoint_path = '',
-        )
+        kwargs = {
+            k: self.hparams[k]
+            for k in [
+                "in_chans",
+                "num_classes",
+                "global_pool",
+                "qkv_bias",
+                "qk_norm",
+                "init_values",
+                "class_token",
+                "no_embed_class",
+                "reg_tokens",
+                "pre_norm",
+                "fc_norm",
+                "dynamic_img_size",
+                "dynamic_img_pad",
+                "drop_rate",
+                "pos_drop_rate",
+                "patch_drop_rate",
+                "proj_drop_rate",
+                "attn_drop_rate",
+                "drop_path_rate",
+                "weight_init",
+                "fix_init",
+            ]
+        }
+        if self.hparams.model_name.startswith("transit"):
+            # add Transit kwargs
+            kwargs.update(
+                {
+                    k: self.hparams[k]
+                    for k in [
+                        "depth",
+                        "block_type",
+                        "z_init_type",
+                        "f_solver",
+                        "b_solver",
+                        "no_stat",
+                        "f_max_iter",
+                        "b_max_iter",
+                        "f_tol",
+                        "b_tol",
+                        "f_stop_mode",
+                        "b_stop_mode",
+                        "eval_factor",
+                        "eval_f_max_iter",
+                        "ift",
+                        "hook_ift",
+                        "grad",
+                        "tau",
+                        "sup_gap",
+                        "sup_loc",
+                        "n_states",
+                        "indexing",
+                        "norm_type",
+                        "prefix_filter_out",
+                        "filter_out",
+                    ]
+                }
+            )
+            kwargs["logger"] = self.log
+
+        self.model = create_model(model_name=self.hparams.model_name, **kwargs)
+        if hparams.distill:
+            self.teacher = create_model(
+                model_name=hparams.teacher_model,
+                num_classes=hparams.num_classes,
+                pretrained=True,
+            )
+            for param in self.teacher.parameters():
+                param.requires_grad = False
+            self.teacher.eval()
+
         self.criterion = get_criterion(hparams)
+        if hparams.distill:
+            self.distill_criterion = torch.nn.KLDivLoss()
         # CutMix and MixUp
         if hparams.cutmix:
             self.cutmix = CutMix(beta=hparams.cutmix_beta)
@@ -57,10 +127,32 @@ class Net(pl.LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def calculate_loss(self, out, label, **kwargs):
+    def calculate_loss(self, out, label, img, **kwargs):
         if self.hparams.criterion in ["fwce", "wce"]:
-            return self.criterion(out, label, kwargs["confidences"])
-        return self.criterion(out, label)
+            loss = self.criterion(out, label, kwargs["confidences"])
+        loss = self.criterion(out, label)
+
+        if self.hparams.distill:
+            with torch.no_grad():
+                self.teacher.eval()
+                teacher_out = self.teacher(img)
+            alpha = self.hparams.distill_alpha
+            if kwargs.get("distill_token") is not None:
+                out = kwargs["distill_token"]
+            if self.hparams.distill_type == "hard":
+                loss = 0.5 * loss + 0.5 * self.criterion(out, teacher_out.argmax(-1))
+            elif self.hparams.distill_type == "soft":
+                tau = self.hparams.distill_temperature
+                loss = (1 - alpha) * loss + alpha * tau**2 * self.distill_criterion(
+                    torch.nn.functional.softmax(out / tau, dim=1),
+                    torch.nn.functional.softmax(teacher_out / tau, dim=1),
+                )
+            else:
+                raise ValueError(
+                    f"Distillation type {self.hparams.distill_type} not implemented."
+                )
+
+        return loss
 
     def configure_optimizers(self):
         """
@@ -117,22 +209,90 @@ class Net(pl.LightningModule):
                 self.logger.experiment.add_tags(
                     [tag.strip() for tag in tags if tag.strip()]
                 )
+        if self.hparams.distill:
+            if self.hparams.finetune_teacher:
+                print("[INFO] Finetuning teacher model.")
+                self.teacher.train()
+
+                # print("[INFO] All layers are frozen except the last one.")
+                # # freeze all layers except the last one
+                # for param in self.teacher.parameters():
+                #     param.requires_grad = False
+                # self.teacher.head.requires_grad = True
+
+                optimizer = torch.optim.Adam(self.teacher.head.parameters(), lr=1e-3)
+                criterion = torch.nn.CrossEntropyLoss()
+                for epoch in range(self.hparams.finetune_teacher_epochs):
+                    corrects = 0
+                    for img, label in tqdm(self.trainer.train_dataloader):
+                        img, label = img.to(self.device), label.to(self.device)
+                        out = self.teacher(img)
+                        loss = criterion(out, label)
+                        corrects += torch.eq(out.argmax(-1), label).sum().item()
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+                    print(
+                        f"[INFO] Teacher finetune epoch: {epoch+1}/{self.hparams.finetune_teacher_epochs}"
+                        + f" Accuracy: {corrects/len(self.trainer.train_dataloader.dataset)}"
+                    )
+                self.teacher.eval()
+
+            else:
+                print("[INFO] Checking the accuracy of the teacher model.")
+                self.teacher.eval()
+                corrects = 0
+                with torch.no_grad():
+                    for img, label in tqdm(self.trainer.val_dataloaders):
+                        img, label = img.to(self.device), label.to(self.device)
+                        out = self.teacher(img)
+                        pred = out.argmax(-1)
+                        corrects += torch.eq(pred, label).sum().item()
+                print(
+                    f"[INFO] Teacher accuracy: {corrects/len(self.trainer.val_dataloaders.dataset)}"
+                )
 
     def _step(self, img, label):
         if self.hparams.cutmix or self.hparams.mixup:
             img, label, rand_label, lambda_ = self.cutmix_mixup(img, label)
-            out = self(img)
+            if self.hparams.use_distill_token:
+                out, distill_token = self(img)
+            else:
+                out = self(img)
+                distill_token = None
             if type(out) == dict:
                 if "confidences" in out:
                     confidences = out["confidences"]
                     out = out["logits"]
                 else:
-                    confidences = None
-                    out = out["logits"][-1]
+                    if self.hparams.criterion in ["fwce", "wce"]:
+                        N = 5
+                        confidences = None
+                        # out = out["logits"][-N:]
+                        out = out["logits"]
+                    else:
+                        confidences = None
+                        out = out["logits"][-1]
             else:
                 confidences = None
-            loss = (self.calculate_loss(out, label, confidences=confidences) * lambda_) + (
-                self.calculate_loss(out, rand_label, confidences=confidences) * (1.0 - lambda_)
+            loss = (
+                self.calculate_loss(
+                    out,
+                    label,
+                    img,
+                    distill_token=distill_token,
+                    confidences=confidences,
+                )
+                * lambda_
+            ) + (
+                self.calculate_loss(
+                    out,
+                    rand_label,
+                    img,
+                    distill_token=distill_token,
+                    confidences=confidences,
+                )
+                * (1.0 - lambda_)
             )
         else:
             if type(out) == dict:
@@ -140,34 +300,49 @@ class Net(pl.LightningModule):
                     confidences = out["confidences"]
                     out = out["logits"]
                 else:
-                    confidences = None
-                    out = out["logits"][-1]
+                    if self.hparams.criterion in ["fwce", "wce"]:
+                        N = 5
+                        confidences = None
+                        # out = out["logits"][-N:]
+                        out = out["logits"]
+                    else:
+                        confidences = None
+                        out = out["logits"][-1]
             else:
                 confidences = None
-            loss = self.calculate_loss(out, label, confidences=confidences)
+            loss = self.calculate_loss(
+                out, label, img, distill_token=distill_token, confidences=confidences
+            )
+
+            if out.dim() == 3:
+                if confidences is not None:
+                    out = out[confidences.argmax(0)]
+                else:
+                    out = out[-1]
 
         return out, loss
 
+    def on_train_epoch_start(self):
+        if self.hparams.use_distill_token:
+            self.model.set_distilled_training(True)
+
     def training_step(self, batch, batch_idx):
+        # TODO: log input images of the first batch (only once)
         img, label = batch
         out, loss = self._step(img, label)
-
-        # TODO: log input images of the first batch (only once)
 
         acc = torch.eq(out.argmax(-1), label).float().mean()
         self.log("train_loss", loss)
         self.log("train_acc", acc)
 
-        # if isinstance(self.model, RiTHalt):
-            # self.log("average iterations", self.model.iterations.mean().item())
-            # self.log_histogram(self.model.iterations, "iterations", self.global_step)
-
         return {
             "loss": loss,
             "acc": acc,
         }
-    
+
     def on_train_epoch_end(self):
+        if self.hparams.use_distill_token:
+            self.model.set_distilled_training(False)
         # log learning rate
         for i, param_group in enumerate(self.optimizer.param_groups):
             self.log(f"lr_{i}", param_group["lr"], on_epoch=True)
@@ -183,51 +358,127 @@ class Net(pl.LightningModule):
         if hasattr(self.model, "halt_noise_scale"):
             try:
                 if self.model.halt_noise_scale != 0:
-                    self.model.halt_noise_scale = (5-1) * self.current_epoch / (self.trainer.max_epochs ) + 1
+                    self.model.halt_noise_scale = (5 - 1) * self.current_epoch / (
+                        self.trainer.max_epochs
+                    ) + 1
                 self.log("halt_noise_scale", self.model.halt_noise_scale)
 
                 with torch.no_grad():
-                    res = self.model.inference(self._sample_input_data,
-                                            repeats= self.model.repeats,
-                                            halt="classify",
-                                            halt_threshold=self.model.halt_threshold,
-                                            ema_alpha=0.5,
-                                            halt_noise_scale=self.model.halt_noise_scale,
-                                            )
-                    block_halt = torch.stack(res['block_halt'])[...,0]
-                    plt.figure(figsize=(10, 6))
-                    plt.plot(block_halt.cpu().numpy())
-                    plt.title(f"Block Halt, epoch: {self.current_epoch}")
-                    plt.savefig("block_halt.png")
+                    # res = self.model.inference(self._sample_input_data,
+                    #                         repeats= self.model.repeats * 2,
+                    #                         halt="classify",
+                    #                         halt_threshold=self.model.halt_threshold,
+                    #                         ema_alpha=0.5,
+                    #                         halt_noise_scale=self.model.halt_noise_scale,
+                    #                         )
+                    # block_halt = torch.stack(res['block_halt'])[...,0]
+                    # plt.figure(figsize=(10, 6))
+                    # plt.plot(block_halt.cpu().numpy())
+                    # plt.title(f"Block Halt, epoch: {self.current_epoch}")
+                    # plt.savefig("block_halt.png")
+                    # plt.clf()
+                    # # log to wandb
+                    # if isinstance(self.logger, pl.loggers.WandbLogger):
+                    #     self.logger.experiment.log(
+                    #         {"Block Halt": wandb.Image("block_halt.png")},
+                    #         step=self.global_step,
+                    #     )
+                    repeats = self.model.repeats
+                    self.model.repeats = repeats * 2
+                    res = self(self._sample_input_data)
+                    outputs = res["logits"]
+                    block_outputs = res["block_outputs"]
+                    # convergence
+                    mse = []
+                    for i in range(outputs.shape[0] - 1):
+                        mse.append(F.mse_loss(outputs[i], outputs[i + 1]).cpu())
+
+                    plt.figure(figsize=(8, 10))
+                    plt.subplot(2, 1, 1)
+                    plt.plot(torch.arange(1, len(mse) + 1), mse)
+                    plt.title(r"Classifier outputs convergence")
+                    plt.xlabel("Iterations")
+                    plt.ylabel(r"$(x_{i+1} - x_{i})^2$")
+                    mse = []
+                    for i in range(block_outputs.shape[0] - 1):
+                        mse.append(
+                            F.mse_loss(block_outputs[i], block_outputs[i + 1]).cpu()
+                        )
+
+                    plt.subplot(2, 1, 2)
+                    plt.plot(torch.arange(1, len(mse) + 1), mse)
+                    plt.title("Blocks outputs convergence")
+                    plt.xlabel("Iterations")
+                    plt.ylabel(r"$(x_{i+1} - x_{i})^2$")
+                    plt.savefig("outputs_convergence.png")
                     plt.clf()
                     # log to wandb
                     if isinstance(self.logger, pl.loggers.WandbLogger):
                         self.logger.experiment.log(
-                            {"Block Halt": wandb.Image("block_halt.png")},
+                            {
+                                "Outputs Convergence": wandb.Image(
+                                    "outputs_convergence.png"
+                                )
+                            },
                             step=self.global_step,
                         )
 
-                if isinstance(self.model, SimpleRiT2):
-                    with torch.no_grad():
-                        out = self.model(self._sample_input_data)
-                        plt.figure(figsize=(10, 6))
-                        plt.plot(out["confidences"].cpu().numpy())
-                        plt.title(f"Confidences, epoch: {self.current_epoch}")
-                        plt.savefig("confidences.png")
-                        plt.clf()
-                        # log to wandb
-                        if isinstance(self.logger, pl.loggers.WandbLogger):
-                            self.logger.experiment.log(
-                                {"Confidences": wandb.Image("confidences.png")},
-                                step=self.global_step,
-                            )
-                            self.logger.experiment.log(
-                                {"Average Confidence": out["confidences"].argmax(0).float().mean().item()},
-                                step=self.global_step,
-                                )
+                    # Performance:
+                    loss = []
+                    accuracy = []
+                    mse = []
+                    for out in outputs:
+                        loss.append(
+                            F.cross_entropy(out, self._sample_input_label).cpu()
+                        )
+                        accuracy.append(
+                            (out.argmax(-1) == self._sample_input_label)
+                            .float()
+                            .mean()
+                            .cpu()
+                        )
+
+                    plt.figure(figsize=(8, 8))
+                    plt.subplot(2, 1, 1)
+                    plt.plot(loss)
+                    plt.title("Performance")
+                    plt.xlabel("Iterations")
+                    plt.ylabel("Cross Entropy Loss")
+                    plt.subplot(2, 1, 2)
+                    plt.plot(accuracy)
+                    plt.xlabel("Iterations")
+                    plt.ylabel("Accuracy")
+                    plt.savefig("performance.png")
+                    plt.clf()
+                    # log to wandb
+                    if isinstance(self.logger, pl.loggers.WandbLogger):
+                        self.logger.experiment.log(
+                            {"Performance": wandb.Image("performance.png")},
+                            step=self.global_step,
+                        )
+
+                    self.model.repeats = repeats
+
+                # if isinstance(self.model, SimpleRiT2):
+                #     with torch.no_grad():
+                #         out = self.model(self._sample_input_data)
+                #         plt.figure(figsize=(10, 6))
+                #         plt.plot(out["confidences"].cpu().numpy())
+                #         plt.title(f"Confidences, epoch: {self.current_epoch}")
+                #         plt.savefig("confidences.png")
+                #         plt.clf()
+                #         # log to wandb
+                #         if isinstance(self.logger, pl.loggers.WandbLogger):
+                #             self.logger.experiment.log(
+                #                 {"Confidences": wandb.Image("confidences.png")},
+                #                 step=self.global_step,
+                #             )
+                #             self.logger.experiment.log(
+                #                 {"Average Confidence": out["confidences"].argmax(0).float().mean().item()},
+                #                 step=self.global_step,
+                #                 )
             except Exception as e:
                 print(f"[ERROR] {e}")
-                        
 
     def optimizer_step(self, *args, **kwargs):
         """
@@ -248,13 +499,22 @@ class Net(pl.LightningModule):
                 confidences = out["confidences"]
                 out = out["logits"]
             else:
-                confidences = None
-                out = out["logits"][-1]
+                if self.hparams.criterion in ["fwce", "wce"]:
+                    N = 5
+                    confidences = None
+                    # out = out["logits"][-N:]
+                    out = out["logits"]
+                else:
+                    confidences = None
+                    out = out["logits"][-1]
         else:
             confidences = None
-        loss = self.calculate_loss(out, label, confidences=confidences)
+        loss = self.calculate_loss(out, label, img, confidences=confidences)
         if out.dim() == 3:
-            out = out[confidences.argmax(0)]
+            if confidences is not None:
+                out = out[confidences.argmax(0)]
+            else:
+                out = out[-1]
         acc = torch.eq(out.argmax(-1), label).float().mean()
         self.log("val_loss", loss)
         self.log("val_acc", acc)
@@ -291,22 +551,24 @@ class Net(pl.LightningModule):
 
     def cutmix_mixup(self, img, label):
         if self.hparams.cutmix and self.hparams.mixup:
-            action = "mixup" if torch.rand(1).item() <= self.hparams.mixup_prob else "cutmix"
+            action = (
+                "mixup" if torch.rand(1).item() <= self.hparams.mixup_prob else "cutmix"
+            )
         elif self.hparams.cutmix:
             action = "cutmix"
         elif self.hparams.mixup:
             action = "mixup"
         else:
             return (
-                    img,
-                    label,
-                    torch.zeros_like(label),
-                    1.0,
-                )
+                img,
+                label,
+                torch.zeros_like(label),
+                1.0,
+            )
         if action == "cutmix":
             img, label, rand_label, lambda_ = self.cutmix((img, label))
         elif action == "mixup":
-                img, label, rand_label, lambda_ = self.mixup((img, label))
+            img, label, rand_label, lambda_ = self.mixup((img, label))
 
         return img, label, rand_label, lambda_
 

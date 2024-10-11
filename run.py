@@ -21,7 +21,7 @@ parser.add_argument(
     type=str,
     choices=["imagenet", "imagenet64", "tiny-imagenet", "cifar10", "cifar100", "svhn", "mnist", "fashionmnist"],
 )
-parser.add_argument("--image-size", default=None, type=int, help="Input image size. If not set, it will be set based on the dataset's default size.")
+parser.add_argument("--img-size", default=None, type=int, help="Input image size. If not set, it will be set based on the dataset's default size.")
 parser.add_argument("--data-root", default="~/data", type=str)
 parser.add_argument("--profiler", default=None, type=str, choices=["simple", "advanced", "pytorch"], help="Profiler to use. If not set, no profiling will be done.")
 parser.add_argument("--batch-size", default=128, type=int)
@@ -129,14 +129,65 @@ parser.add_argument("--no-pin-memory", action="store_false", dest="pin_memory")
 parser.add_argument("--no-shuffle", action="store_false", dest="shuffle")
 parser.add_argument("--allow-download", action="store_true", dest="download_data")
 parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
-
-# model parameters
-parser.add_argument("--dropout", default=0.0, type=float)
-
-# extra args
-parser.add_argument("--iteration-loss", action="store_true")
+# Distillation
+parser.add_argument("--distill", action="store_true")
+parser.add_argument("--teacher-model", default=None, type=str)
+parser.add_argument("--distill-type", default="hard", type=str, choices=["soft", "hard"])
+parser.add_argument("--distill-token", action="store_true", dest="use_distill_token")
+parser.add_argument("--distill-alpha", default=0.1, type=float)
+parser.add_argument("--distill-temperature", default=3.0, type=float)
+parser.add_argument("--finetune-teacher", action="store_true")
+parser.add_argument("--finetune-teacher-epochs", default=10, type=int)
+# model args
+# ViT args
+parser.add_argument("--depth", default=1, type=int)
+parser.add_argument("--global-pool", default="token", type=str, choices=["", "avg", "token", "map"])
+parser.add_argument("--no-qkv-bias", action="store_false", dest="qkv_bias")
+parser.add_argument("--qk-norm", action="store_true")
+parser.add_argument("--init-values", default=None, type=float)
+parser.add_argument("--no-class-token", action="store_false", dest="class_token")
+parser.add_argument("--no-embed-class", action="store_true")
+parser.add_argument("--reg-tokens", default=0, type=int)
+parser.add_argument("--pre-norm", action="store_true")
+parser.add_argument("--fc-norm", default=None, type=bool)
+parser.add_argument("--dynamic-img-size", action="store_true")
+parser.add_argument("--dynamic-img-pad", action="store_true")
+parser.add_argument("--drop-rate", default=0.0, type=float)
+parser.add_argument("--pos-drop-rate", default=0.0, type=float)
+parser.add_argument("--patch-drop-rate", default=0.0, type=float)
+parser.add_argument("--proj-drop-rate", default=0.0, type=float)
+parser.add_argument("--attn-drop-rate", default=0.0, type=float)
+parser.add_argument("--drop-path-rate", default=0.0, type=float)
+parser.add_argument("--weight-init", default="", type=str)
+parser.add_argument("--fix-init", action="store_true")
+# Transit:
+parser.add_argument("--block-type", type=str, default="add")
+parser.add_argument("--z-init-type", type=str, default="zero", choices=["zero", "input"])
+parser.add_argument("--f-solver", default="fixed_point_iter", type=str)
+parser.add_argument("--b-solver", default="fixed_point_iter", type=str)
+parser.add_argument("--no-stat", default=None, type=bool)
+parser.add_argument("--f-max-iter", default=40, type=int)
+parser.add_argument("--b-max-iter", default=40, type=int)
+parser.add_argument("--f-tol", default=1e-3, type=float)
+parser.add_argument("--b-tol", default=1e-6, type=float)
+parser.add_argument("--f-stop-mode", default="abs", type=str)
+parser.add_argument("--b-stop-mode", default="abs", type=str)
+parser.add_argument("--eval-factor", default=1.0, type=float)
+parser.add_argument("--eval-f-max-iter", default=0, type=int)
+parser.add_argument("--ift", action="store_true")
+parser.add_argument("--hook-ift", action="store_true")
+parser.add_argument("--grad", default=1, type=int)
+parser.add_argument("--tau", default=1.0, type=float)
+parser.add_argument("--sup-gap", default=-1, type=int)
+parser.add_argument("--sup-loc", default=None, type=int)
+parser.add_argument("--n-states", default=1, type=int)
+parser.add_argument("--indexing", default=None, type=int)
+parser.add_argument("--norm-type", default="weight_norm", type=str)
+parser.add_argument("--prefix-filter-out", default=None, type=str)
+parser.add_argument("--filter-out", default=None, type=str)
 
 args = parser.parse_args()
+
 
 
 if __name__ == "__main__":

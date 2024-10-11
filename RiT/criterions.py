@@ -85,13 +85,19 @@ class WeightedCrossEntropyLoss(nn.Module):
             N: number of samples, B: batch size, C: number of classes
         """
         loss = 0
-        for i in range(preds.size(0)):
-            loss += (
-                F.cross_entropy(
-                    preds[i], target, label_smoothing=self.label_smoothing, reduce=False
+        if weight is not None:
+            for i in range(preds.size(0)):
+                loss += (
+                    F.cross_entropy(
+                        preds[i], target, label_smoothing=self.label_smoothing, reduce=False
+                    )
+                    * weight[i]
+                ).mean()
+        else:
+            for i in range(preds.size(0)):
+                loss += F.cross_entropy(
+                    preds[i], target, label_smoothing=self.label_smoothing
                 )
-                * weight[i]
-            ).mean()
 
         return loss
 

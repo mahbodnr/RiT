@@ -103,7 +103,9 @@ class TinyImageNetDataset(Dataset):
 def get_transform(args):
     train_transform = []
     val_transform = []
-    input_size = args.dataset_image_shape[1:] if args.image_size is None else args.image_size
+    input_size = args.dataset_image_shape[1:] if args.img_size is None else args.img_size
+    if type(input_size) is int:
+        input_size = (input_size, input_size)
 
     if args.autoaugment:
         if args.dataset in ["cifar10", "imagenet", "svhn"]:
@@ -164,7 +166,7 @@ def get_transform(args):
 
 def get_dataloader(args):
     if args.dataset == "cifar10":
-        args.in_c = 3
+        args.in_chans = 3
         args.num_classes = 10
         args.dataset_image_shape = (3, 32, 32)
         args.mean, args.std = [0.4914, 0.4822, 0.4465], [0.2470, 0.2435, 0.2616]
@@ -183,7 +185,7 @@ def get_dataloader(args):
         )
 
     elif args.dataset == "cifar100":
-        args.in_c = 3
+        args.in_chans = 3
         args.num_classes = 100
         args.dataset_image_shape = (3, 32, 32)
         args.mean, args.std = [0.5071, 0.4867, 0.4408], [0.2675, 0.2565, 0.2761]
@@ -202,7 +204,7 @@ def get_dataloader(args):
         )
 
     elif args.dataset == "svhn":
-        args.in_c = 3
+        args.in_chans = 3
         args.num_classes = 10
         args.dataset_image_shape = (3, 32, 32)
         args.mean, args.std = [0.4377, 0.4438, 0.4728], [0.1980, 0.2010, 0.1970]
@@ -221,7 +223,7 @@ def get_dataloader(args):
         )
 
     elif args.dataset == "mnist":
-        args.in_c = 1
+        args.in_chans = 1
         args.num_classes = 10
         args.size = (1, 28, 28)
         args.mean, args.std = [0.1307], [0.3081]
@@ -239,7 +241,7 @@ def get_dataloader(args):
             download=args.download_data,
         )
     elif args.dataset == "fashionmnist":
-        args.in_c = 1
+        args.in_chans = 1
         args.num_classes = 10
         args.dataset_image_shape = (1, 28, 28)
         args.mean, args.std = [0.2860], [0.3530]
@@ -258,7 +260,7 @@ def get_dataloader(args):
         )
 
     elif args.dataset == "imagenet":
-        args.in_c = 3
+        args.in_chans = 3
         args.num_classes = 1000
         args.dataset_image_shape = (3, 224, 224)
         args.mean, args.std = (
@@ -280,7 +282,7 @@ def get_dataloader(args):
     elif args.dataset == "imagenet64":
         # Download from  https://www.image-net.org/download-images.php
         # and extract to data_root
-        args.in_c = 3
+        args.in_chans = 3
         args.num_classes = 1000
         args.dataset_image_shape = (3, 64, 64)
         args.mean, args.std = (
@@ -300,7 +302,7 @@ def get_dataloader(args):
         )
 
     elif args.dataset == "tiny-imagenet":
-        args.in_c = 3
+        args.in_chans = 3
         args.num_classes = 200
         args.dataset_image_shape = (3, 64, 64)
         args.mean, args.std = (

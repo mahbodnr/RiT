@@ -47,12 +47,15 @@ model_path = r"model_checkpoints/srit2_d1_tiny_patch16_224_tiny-imagenet_yhcsi_2
 # model_path = r"model_checkpoints/srit2_d1_tiny_patch16_224_tiny-imagenet_jbyly_20240919162050.ckpt"
 # lambda 12 sd => not fixed but keeps the accuracy to some extend
 # model_path = r"model_checkpoints/srit2_d1_tiny_patch16_224_tiny-imagenet_tiqza_20240919163742.ckpt"
+# srit3
+model_path = r"model_checkpoints/srit3_d1_tiny_patch16_224_tiny-imagenet_oelue_20240924142504.ckpt"
 
 # tmp
-model_path = r"logs/RiT/32zvbfxb/checkpoints/srit_d1_tiny_patch16_224_tiny-imagenet_dvvtv_20240921095027-epoch=215-val_loss=2.61.ckpt"
+# model_path = r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_fgtpi_20241002101154.ckpt"
 
 state = torch.load(model_path)
 args = argparse.Namespace(**state["hyper_parameters"])
+args.block_type = "add"
 # torch set default dtype
 if args.default_dtype == "float64":
     torch.set_default_dtype(torch.float64)
@@ -68,11 +71,19 @@ net = Net(args).to(device)
 net.load_state_dict(state["state_dict"])
 net.eval()
 # %%
+net.model.deq.f_tol
+# %%
+args.f_tol= 100
+net = Net(args).to(device)
+net.load_state_dict(state["state_dict"])
+net.eval()
+
+# %%
 # import pytorch_lightning as pl
-# trainer = pl.Trainer(accelerator="auto")
+trainer = pl.Trainer(accelerator="auto")
 # net.model.repeats = 12
-# trainer.test(net, test_dl)
-# # %%
+trainer.test(net, test_dl)
+# %%
 # with torch.no_grad():
 #     for img, label in test_dl:
 #         img, label = img.to(device), label.to(device)
@@ -91,7 +102,7 @@ net.eval()
 # %% SRiT2
 with torch.no_grad():
     net.model.stochastic_depth = False
-    net.model.repeats = 50
+    net.model.repeats = 150
 
     img, label = next(iter(test_dl))
     img, label = img.to(device), label.to(device)
@@ -235,7 +246,7 @@ for smaple in tqdm(range(outputs.shape[1])):
     dots.append(reducer.fit_transform(
         outputs[:, smaple, :].cpu().numpy()
     ))
-    if smaple == 20:
+    if smaple == 16:
         break
 dots = np.stack(dots)
 dots.shape
@@ -250,7 +261,7 @@ for i in range(16):
     tr = dots[i][:]
     ax.plot(tr[:, 0], tr[:, 1], tr[:, 2], alpha=0.5)
     ax.scatter(tr[:, 0], tr[:, 1], tr[:, 2], c=np.arange(tr.shape[0]), s=50, cmap="viridis")
-    N = 49
+    N = 12
     ax.scatter(tr[N, 0], tr[N, 1], tr[N, 2], c="red", s=150)
     ax.scatter(tr[0, 0], tr[0, 1], tr[0, 2], c="black", s=150, label="start")
 ax.set_title(f"Trajectory")

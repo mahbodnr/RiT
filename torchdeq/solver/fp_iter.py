@@ -71,7 +71,7 @@ def fixed_point_iter(func, x0,
             indexing_list.append(lowest_xest)
 
         # If the difference is smaller than the given tolerance, terminate the loop early
-        if not return_final and trace_dict[stop_mode][-1].max() < tol:
+        if not return_final and tol>0 and  trace_dict[stop_mode][-1].max() < tol:
             for _ in range(max_iter-1-k):
                 trace_dict[stop_mode].append(lowest_dict[stop_mode])
                 trace_dict[alternative_mode].append(lowest_dict[alternative_mode])
