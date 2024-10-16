@@ -103,7 +103,7 @@ class DiTBlock(nn.Module):
 class RiT(nn.Module):
     def __init__(
         self,
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=1000,
@@ -131,7 +131,7 @@ class RiT(nn.Module):
         )  # (T, B)
 
         self.patch_embed = PatchEmbed(
-            img_size=image_size,
+            img_size=img_size,
             patch_size=patch_size,
             in_chans=channels,
             embed_dim=dim,
@@ -193,7 +193,7 @@ class RiT(nn.Module):
 class SimpleRiT(nn.Module):
     def __init__(
         self,
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=1000,
@@ -226,7 +226,7 @@ class SimpleRiT(nn.Module):
         self.stochastic_depth = stochastic_depth
 
         self.patch_embed = PatchEmbed(
-            img_size=image_size,
+            img_size=img_size,
             patch_size=patch_size,
             in_chans=channels,
             embed_dim=dim,
@@ -558,7 +558,7 @@ class ViTBlockIm(nn.Module):
 class SimpleRiT3(SimpleRiT):
     def __init__(
         self,
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=1000,
@@ -578,7 +578,7 @@ class SimpleRiT3(SimpleRiT):
         normalize=False, # DELETE LATER
     ):
         super().__init__(
-            image_size=image_size,
+            img_size=img_size,
             patch_size=patch_size,
             channels=channels,
             num_classes=num_classes,
@@ -739,7 +739,7 @@ class DiTBlockHalt(nn.Module):
 class RiTHalt(nn.Module):
     def __init__(
         self,
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=1000,
@@ -775,7 +775,7 @@ class RiTHalt(nn.Module):
             requires_grad=False,
         )  # (T, B)
         self.patch_embed = PatchEmbed(
-            img_size=image_size,
+            img_size=img_size,
             patch_size=patch_size,
             in_chans=channels,
             embed_dim=dim,
@@ -964,7 +964,7 @@ class RiTHalt(nn.Module):
 def rit_d1_tiny_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -981,7 +981,7 @@ def rit_d1_tiny_patch4_32(pretrained=False, **kwargs):
 def rit_d1_tiny_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -998,7 +998,7 @@ def rit_d1_tiny_patch4_64(pretrained=False, **kwargs):
 def rit_d1_tiny_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1015,7 +1015,7 @@ def rit_d1_tiny_patch4_224(pretrained=False, **kwargs):
 def rit_d1_tiny_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1032,7 +1032,7 @@ def rit_d1_tiny_patch8_32(pretrained=False, **kwargs):
 def rit_d1_tiny_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1049,7 +1049,7 @@ def rit_d1_tiny_patch8_64(pretrained=False, **kwargs):
 def rit_d1_tiny_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1066,7 +1066,7 @@ def rit_d1_tiny_patch8_224(pretrained=False, **kwargs):
 def rit_d1_tiny_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1083,7 +1083,7 @@ def rit_d1_tiny_patch16_32(pretrained=False, **kwargs):
 def rit_d1_tiny_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1100,7 +1100,7 @@ def rit_d1_tiny_patch16_64(pretrained=False, **kwargs):
 def rit_d1_tiny_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1117,7 +1117,7 @@ def rit_d1_tiny_patch16_224(pretrained=False, **kwargs):
 def rit_d1_tiny_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1134,7 +1134,7 @@ def rit_d1_tiny_patch32_32(pretrained=False, **kwargs):
 def rit_d1_tiny_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1151,7 +1151,7 @@ def rit_d1_tiny_patch32_64(pretrained=False, **kwargs):
 def rit_d1_tiny_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1168,7 +1168,7 @@ def rit_d1_tiny_patch32_224(pretrained=False, **kwargs):
 def rit_d1_small_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1185,7 +1185,7 @@ def rit_d1_small_patch4_32(pretrained=False, **kwargs):
 def rit_d1_small_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1202,7 +1202,7 @@ def rit_d1_small_patch4_64(pretrained=False, **kwargs):
 def rit_d1_small_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1219,7 +1219,7 @@ def rit_d1_small_patch4_224(pretrained=False, **kwargs):
 def rit_d1_small_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1236,7 +1236,7 @@ def rit_d1_small_patch8_32(pretrained=False, **kwargs):
 def rit_d1_small_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1253,7 +1253,7 @@ def rit_d1_small_patch8_64(pretrained=False, **kwargs):
 def rit_d1_small_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1270,7 +1270,7 @@ def rit_d1_small_patch8_224(pretrained=False, **kwargs):
 def rit_d1_small_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1287,7 +1287,7 @@ def rit_d1_small_patch16_32(pretrained=False, **kwargs):
 def rit_d1_small_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1304,7 +1304,7 @@ def rit_d1_small_patch16_64(pretrained=False, **kwargs):
 def rit_d1_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1321,7 +1321,7 @@ def rit_d1_small_patch16_224(pretrained=False, **kwargs):
 def rit_d1_small_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1338,7 +1338,7 @@ def rit_d1_small_patch32_32(pretrained=False, **kwargs):
 def rit_d1_small_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1355,7 +1355,7 @@ def rit_d1_small_patch32_64(pretrained=False, **kwargs):
 def rit_d1_small_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1372,7 +1372,7 @@ def rit_d1_small_patch32_224(pretrained=False, **kwargs):
 def rit_d1_base_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1389,7 +1389,7 @@ def rit_d1_base_patch4_32(pretrained=False, **kwargs):
 def rit_d1_base_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1406,7 +1406,7 @@ def rit_d1_base_patch4_64(pretrained=False, **kwargs):
 def rit_d1_base_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1423,7 +1423,7 @@ def rit_d1_base_patch4_224(pretrained=False, **kwargs):
 def rit_d1_base_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1440,7 +1440,7 @@ def rit_d1_base_patch8_32(pretrained=False, **kwargs):
 def rit_d1_base_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1457,7 +1457,7 @@ def rit_d1_base_patch8_64(pretrained=False, **kwargs):
 def rit_d1_base_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1474,7 +1474,7 @@ def rit_d1_base_patch8_224(pretrained=False, **kwargs):
 def rit_d1_base_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1491,7 +1491,7 @@ def rit_d1_base_patch16_32(pretrained=False, **kwargs):
 def rit_d1_base_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1508,7 +1508,7 @@ def rit_d1_base_patch16_64(pretrained=False, **kwargs):
 def rit_d1_base_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1525,7 +1525,7 @@ def rit_d1_base_patch16_224(pretrained=False, **kwargs):
 def rit_d1_base_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1542,7 +1542,7 @@ def rit_d1_base_patch32_32(pretrained=False, **kwargs):
 def rit_d1_base_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1559,7 +1559,7 @@ def rit_d1_base_patch32_64(pretrained=False, **kwargs):
 def rit_d1_base_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1576,7 +1576,7 @@ def rit_d1_base_patch32_224(pretrained=False, **kwargs):
 def rit_d1_large_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1593,7 +1593,7 @@ def rit_d1_large_patch4_32(pretrained=False, **kwargs):
 def rit_d1_large_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1610,7 +1610,7 @@ def rit_d1_large_patch4_64(pretrained=False, **kwargs):
 def rit_d1_large_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1627,7 +1627,7 @@ def rit_d1_large_patch4_224(pretrained=False, **kwargs):
 def rit_d1_large_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1644,7 +1644,7 @@ def rit_d1_large_patch8_32(pretrained=False, **kwargs):
 def rit_d1_large_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1661,7 +1661,7 @@ def rit_d1_large_patch8_64(pretrained=False, **kwargs):
 def rit_d1_large_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1678,7 +1678,7 @@ def rit_d1_large_patch8_224(pretrained=False, **kwargs):
 def rit_d1_large_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1695,7 +1695,7 @@ def rit_d1_large_patch16_32(pretrained=False, **kwargs):
 def rit_d1_large_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1712,7 +1712,7 @@ def rit_d1_large_patch16_64(pretrained=False, **kwargs):
 def rit_d1_large_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1729,7 +1729,7 @@ def rit_d1_large_patch16_224(pretrained=False, **kwargs):
 def rit_d1_large_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1746,7 +1746,7 @@ def rit_d1_large_patch32_32(pretrained=False, **kwargs):
 def rit_d1_large_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1763,7 +1763,7 @@ def rit_d1_large_patch32_64(pretrained=False, **kwargs):
 def rit_d1_large_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1780,7 +1780,7 @@ def rit_d1_large_patch32_224(pretrained=False, **kwargs):
 def rit_d1_huge_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1797,7 +1797,7 @@ def rit_d1_huge_patch4_32(pretrained=False, **kwargs):
 def rit_d1_huge_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1814,7 +1814,7 @@ def rit_d1_huge_patch4_64(pretrained=False, **kwargs):
 def rit_d1_huge_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1831,7 +1831,7 @@ def rit_d1_huge_patch4_224(pretrained=False, **kwargs):
 def rit_d1_huge_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1848,7 +1848,7 @@ def rit_d1_huge_patch8_32(pretrained=False, **kwargs):
 def rit_d1_huge_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1865,7 +1865,7 @@ def rit_d1_huge_patch8_64(pretrained=False, **kwargs):
 def rit_d1_huge_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1882,7 +1882,7 @@ def rit_d1_huge_patch8_224(pretrained=False, **kwargs):
 def rit_d1_huge_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1899,7 +1899,7 @@ def rit_d1_huge_patch16_32(pretrained=False, **kwargs):
 def rit_d1_huge_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1916,7 +1916,7 @@ def rit_d1_huge_patch16_64(pretrained=False, **kwargs):
 def rit_d1_huge_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1933,7 +1933,7 @@ def rit_d1_huge_patch16_224(pretrained=False, **kwargs):
 def rit_d1_huge_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=32,
+        img_size=32,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1950,7 +1950,7 @@ def rit_d1_huge_patch32_32(pretrained=False, **kwargs):
 def rit_d1_huge_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=64,
+        img_size=64,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1967,7 +1967,7 @@ def rit_d1_huge_patch32_64(pretrained=False, **kwargs):
 def rit_d1_huge_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiT(
-        image_size=224,
+        img_size=224,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -1984,7 +1984,7 @@ def rit_d1_huge_patch32_224(pretrained=False, **kwargs):
 def rith_d1_tiny_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2003,7 +2003,7 @@ def rith_d1_tiny_patch4_32(pretrained=False, **kwargs):
 def rith_d1_tiny_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2022,7 +2022,7 @@ def rith_d1_tiny_patch4_64(pretrained=False, **kwargs):
 def rith_d1_tiny_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2041,7 +2041,7 @@ def rith_d1_tiny_patch4_224(pretrained=False, **kwargs):
 def rith_d1_tiny_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2060,7 +2060,7 @@ def rith_d1_tiny_patch8_32(pretrained=False, **kwargs):
 def rith_d1_tiny_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2079,7 +2079,7 @@ def rith_d1_tiny_patch8_64(pretrained=False, **kwargs):
 def rith_d1_tiny_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2098,7 +2098,7 @@ def rith_d1_tiny_patch8_224(pretrained=False, **kwargs):
 def rith_d1_tiny_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2117,7 +2117,7 @@ def rith_d1_tiny_patch16_32(pretrained=False, **kwargs):
 def rith_d1_tiny_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2136,7 +2136,7 @@ def rith_d1_tiny_patch16_64(pretrained=False, **kwargs):
 def rith_d1_tiny_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2155,7 +2155,7 @@ def rith_d1_tiny_patch16_224(pretrained=False, **kwargs):
 def rith_d1_tiny_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2174,7 +2174,7 @@ def rith_d1_tiny_patch32_32(pretrained=False, **kwargs):
 def rith_d1_tiny_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2193,7 +2193,7 @@ def rith_d1_tiny_patch32_64(pretrained=False, **kwargs):
 def rith_d1_tiny_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2212,7 +2212,7 @@ def rith_d1_tiny_patch32_224(pretrained=False, **kwargs):
 def rith_d1_small_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2231,7 +2231,7 @@ def rith_d1_small_patch4_32(pretrained=False, **kwargs):
 def rith_d1_small_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2250,7 +2250,7 @@ def rith_d1_small_patch4_64(pretrained=False, **kwargs):
 def rith_d1_small_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2269,7 +2269,7 @@ def rith_d1_small_patch4_224(pretrained=False, **kwargs):
 def rith_d1_small_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2288,7 +2288,7 @@ def rith_d1_small_patch8_32(pretrained=False, **kwargs):
 def rith_d1_small_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2307,7 +2307,7 @@ def rith_d1_small_patch8_64(pretrained=False, **kwargs):
 def rith_d1_small_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2326,7 +2326,7 @@ def rith_d1_small_patch8_224(pretrained=False, **kwargs):
 def rith_d1_small_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2345,7 +2345,7 @@ def rith_d1_small_patch16_32(pretrained=False, **kwargs):
 def rith_d1_small_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2364,7 +2364,7 @@ def rith_d1_small_patch16_64(pretrained=False, **kwargs):
 def rith_d1_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2383,7 +2383,7 @@ def rith_d1_small_patch16_224(pretrained=False, **kwargs):
 def rith_d1_small_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2402,7 +2402,7 @@ def rith_d1_small_patch32_32(pretrained=False, **kwargs):
 def rith_d1_small_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2421,7 +2421,7 @@ def rith_d1_small_patch32_64(pretrained=False, **kwargs):
 def rith_d1_small_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2440,7 +2440,7 @@ def rith_d1_small_patch32_224(pretrained=False, **kwargs):
 def rith_d1_base_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2459,7 +2459,7 @@ def rith_d1_base_patch4_32(pretrained=False, **kwargs):
 def rith_d1_base_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2478,7 +2478,7 @@ def rith_d1_base_patch4_64(pretrained=False, **kwargs):
 def rith_d1_base_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2497,7 +2497,7 @@ def rith_d1_base_patch4_224(pretrained=False, **kwargs):
 def rith_d1_base_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2516,7 +2516,7 @@ def rith_d1_base_patch8_32(pretrained=False, **kwargs):
 def rith_d1_base_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2535,7 +2535,7 @@ def rith_d1_base_patch8_64(pretrained=False, **kwargs):
 def rith_d1_base_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2554,7 +2554,7 @@ def rith_d1_base_patch8_224(pretrained=False, **kwargs):
 def rith_d1_base_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2573,7 +2573,7 @@ def rith_d1_base_patch16_32(pretrained=False, **kwargs):
 def rith_d1_base_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2592,7 +2592,7 @@ def rith_d1_base_patch16_64(pretrained=False, **kwargs):
 def rith_d1_base_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2611,7 +2611,7 @@ def rith_d1_base_patch16_224(pretrained=False, **kwargs):
 def rith_d1_base_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2630,7 +2630,7 @@ def rith_d1_base_patch32_32(pretrained=False, **kwargs):
 def rith_d1_base_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2649,7 +2649,7 @@ def rith_d1_base_patch32_64(pretrained=False, **kwargs):
 def rith_d1_base_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2668,7 +2668,7 @@ def rith_d1_base_patch32_224(pretrained=False, **kwargs):
 def rith_d1_large_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2687,7 +2687,7 @@ def rith_d1_large_patch4_32(pretrained=False, **kwargs):
 def rith_d1_large_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2706,7 +2706,7 @@ def rith_d1_large_patch4_64(pretrained=False, **kwargs):
 def rith_d1_large_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2725,7 +2725,7 @@ def rith_d1_large_patch4_224(pretrained=False, **kwargs):
 def rith_d1_large_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2744,7 +2744,7 @@ def rith_d1_large_patch8_32(pretrained=False, **kwargs):
 def rith_d1_large_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2763,7 +2763,7 @@ def rith_d1_large_patch8_64(pretrained=False, **kwargs):
 def rith_d1_large_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2782,7 +2782,7 @@ def rith_d1_large_patch8_224(pretrained=False, **kwargs):
 def rith_d1_large_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2801,7 +2801,7 @@ def rith_d1_large_patch16_32(pretrained=False, **kwargs):
 def rith_d1_large_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2820,7 +2820,7 @@ def rith_d1_large_patch16_64(pretrained=False, **kwargs):
 def rith_d1_large_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2839,7 +2839,7 @@ def rith_d1_large_patch16_224(pretrained=False, **kwargs):
 def rith_d1_large_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2858,7 +2858,7 @@ def rith_d1_large_patch32_32(pretrained=False, **kwargs):
 def rith_d1_large_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2877,7 +2877,7 @@ def rith_d1_large_patch32_64(pretrained=False, **kwargs):
 def rith_d1_large_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2896,7 +2896,7 @@ def rith_d1_large_patch32_224(pretrained=False, **kwargs):
 def rith_d1_huge_patch4_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2915,7 +2915,7 @@ def rith_d1_huge_patch4_32(pretrained=False, **kwargs):
 def rith_d1_huge_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2934,7 +2934,7 @@ def rith_d1_huge_patch4_64(pretrained=False, **kwargs):
 def rith_d1_huge_patch4_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2953,7 +2953,7 @@ def rith_d1_huge_patch4_224(pretrained=False, **kwargs):
 def rith_d1_huge_patch8_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2972,7 +2972,7 @@ def rith_d1_huge_patch8_32(pretrained=False, **kwargs):
 def rith_d1_huge_patch8_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -2991,7 +2991,7 @@ def rith_d1_huge_patch8_64(pretrained=False, **kwargs):
 def rith_d1_huge_patch8_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=8,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3010,7 +3010,7 @@ def rith_d1_huge_patch8_224(pretrained=False, **kwargs):
 def rith_d1_huge_patch16_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3029,7 +3029,7 @@ def rith_d1_huge_patch16_32(pretrained=False, **kwargs):
 def rith_d1_huge_patch16_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3048,7 +3048,7 @@ def rith_d1_huge_patch16_64(pretrained=False, **kwargs):
 def rith_d1_huge_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3067,7 +3067,7 @@ def rith_d1_huge_patch16_224(pretrained=False, **kwargs):
 def rith_d1_huge_patch32_32(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=32,
+        img_size=32,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3086,7 +3086,7 @@ def rith_d1_huge_patch32_32(pretrained=False, **kwargs):
 def rith_d1_huge_patch32_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3105,7 +3105,7 @@ def rith_d1_huge_patch32_64(pretrained=False, **kwargs):
 def rith_d1_huge_patch32_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=32,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3124,7 +3124,7 @@ def rith_d1_huge_patch32_224(pretrained=False, **kwargs):
 def rith_d3_tiny_patch4_64(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=64,
+        img_size=64,
         patch_size=4,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3143,7 +3143,7 @@ def rith_d3_tiny_patch4_64(pretrained=False, **kwargs):
 def rith_d3_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return RiTHalt(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3162,7 +3162,7 @@ def rith_d3_small_patch16_224(pretrained=False, **kwargs):
 def srit_d1_tiny_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3182,7 +3182,7 @@ def srit_d1_tiny_patch16_224(pretrained=False, **kwargs):
 def srit_d1_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3202,7 +3202,7 @@ def srit_d1_small_patch16_224(pretrained=False, **kwargs):
 def srit_d3_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3220,7 +3220,7 @@ def srit_d3_small_patch16_224(pretrained=False, **kwargs):
 def srit_d1_base_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3239,7 +3239,7 @@ def srit_d1_base_patch16_224(pretrained=False, **kwargs):
 def srit_d3_base_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3257,7 +3257,7 @@ def srit_d3_base_patch16_224(pretrained=False, **kwargs):
 def srit2_d1_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT2(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3277,7 +3277,7 @@ def srit2_d1_small_patch16_224(pretrained=False, **kwargs):
 def srit2_d1_tiny_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT2(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3298,7 +3298,7 @@ def srit2_d1_tiny_patch16_224(pretrained=False, **kwargs):
 def srit3_d1_tiny_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT3(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3318,7 +3318,7 @@ def srit3_d1_tiny_patch16_224(pretrained=False, **kwargs):
 def srit3_d1_small_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT3(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],
@@ -3338,7 +3338,7 @@ def srit3_d1_small_patch16_224(pretrained=False, **kwargs):
 def srit3_d12_tiny_patch16_224(pretrained=False, **kwargs):
     assert not pretrained, "Pretrained models not available for this model."
     return SimpleRiT3(
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=kwargs["num_classes"],

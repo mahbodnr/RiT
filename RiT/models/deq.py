@@ -33,7 +33,6 @@ from torchdeq import get_deq
 from torchdeq.norm import apply_norm, reset_norm
 
 
-
 class Attention(nn.Module):
     fused_attn: Final[bool]
 
@@ -48,7 +47,9 @@ class Attention(nn.Module):
         norm_layer: nn.Module = nn.LayerNorm,
     ) -> None:
         super().__init__()
-        assert dim % num_heads == 0, f"dim should be divisible by num_heads. {dim} % {num_heads} != 0"
+        assert (
+            dim % num_heads == 0
+        ), f"dim should be divisible by num_heads. {dim} % {num_heads} != 0"
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
@@ -73,7 +74,38 @@ class Attention(nn.Module):
 
         if self.fused_attn:
             x = F.scaled_dot_product_attention(
-                q,k,v,
+                q,
+                k,
+                v,
+                dropout_p=self.attn_drop.p if self.training else 0.0,
+            )
+        else:
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
+class AttentionInj(Attention):
+    def forward(self, x: torch.Tensor, injection: torch.Tensor) -> torch.Tensor:
+        B, N, C = x.shape
+        qkv = (self.qkv(x) + injection.repeat(1, 1, 3)).reshape(
+            B, N, 3, self.num_heads, self.head_dim
+        ).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
                 dropout_p=self.attn_drop.p if self.training else 0.0,
             )
         else:
@@ -131,7 +163,8 @@ class Block(nn.Module):
         self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         raise NotImplementedError()
-    
+
+
 class BlockBase(Block):
     def forward(
         self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
@@ -140,6 +173,7 @@ class BlockBase(Block):
         x = x + self.mlp(self.norm1(x))
         x = self.norm2(x)
         return x
+
 
 class BlockPreNorm(Block):
     def forward(
@@ -150,6 +184,7 @@ class BlockPreNorm(Block):
         x = self.norm2(x)
         x = x + self.mlp(x)
         return x
+
 
 class BlockPreNormAdd(Block):
     def forward(
@@ -162,6 +197,7 @@ class BlockPreNormAdd(Block):
         x = x + self.mlp(x)
         return x
 
+
 class BlockAdd(Block):
     def forward(
         self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
@@ -171,16 +207,76 @@ class BlockAdd(Block):
         x = x + self.mlp(self.norm1(x))
         x = self.norm2(x)
         return x
-    
+
+
 class BlockAttn(Block):
     def forward(
         self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         x = torch.cat([x, injection], dim=1)
         x = x + self.attn(x)
-        x = x[:, :-injection.shape[1]]
+        x = x[:, : -injection.shape[1]]
         x = x + self.mlp(self.norm1(x))
         x = self.norm2(x)
+        return x
+
+
+class BlockQKV(Block):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        proj_drop: float = 0.0,
+        attn_drop: float = 0.0,
+        drop_path: float = 0.0,
+        init_values: Optional[float] = None,
+        act_layer: nn.Module = nn.GELU,
+        norm_layer: nn.Module = nn.LayerNorm,
+        mlp_layer: nn.Module = Mlp,
+    ):
+        super().__init__(
+            dim,
+            num_heads,
+            mlp_ratio,
+            qkv_bias,
+            qk_norm,
+            proj_drop,
+            attn_drop,
+            drop_path,
+            init_values,
+            act_layer,
+            norm_layer,
+            mlp_layer,
+        )
+        self.attn = AttentionInj(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
+            norm_layer=norm_layer,
+        )
+
+    def forward(
+        self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        x = x + self.attn(x, injection)
+        x = x + self.mlp(self.norm1(x))
+        x = self.norm2(x)
+        return x
+
+class BlockPreNormQKV(BlockQKV):
+    def forward(
+        self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        x = self.norm1(x)
+        x = x + self.attn(x, injection)
+        x = self.norm2(x)
+        x = x + self.mlp(x)
         return x
 
 class Transit(VisionTransformer):
@@ -207,7 +303,7 @@ class Transit(VisionTransformer):
         class_token: bool = True,
         no_embed_class: bool = False,
         reg_tokens: int = 0,
-        pre_norm: bool = False, 
+        pre_norm: bool = False,
         fc_norm: Optional[bool] = None,
         dynamic_img_size: bool = False,
         dynamic_img_pad: bool = False,
@@ -412,16 +508,12 @@ class Transit(VisionTransformer):
                     continue
                 if info[key].mean() == 1e8:
                     continue
-                self.logger(
-                    f"Forward/{key}", info[key].mean()
-                )
+                self.logger(f"Forward/{key}", info[key].mean())
 
     def deq_backward_writer(self, info):
         if self.logger is not None:
             for key in ("abs_lowest", "rel_lowest", "nstep"):
-                self.logger(
-                    f"Backward/{key}", info[key].mean()
-                )
+                self.logger(f"Backward/{key}", info[key].mean())
 
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable: bool = True) -> None:
@@ -459,7 +551,7 @@ class Transit(VisionTransformer):
         z_init = self._init_z(x)
         z, info = self.deq(deq_func, z_init, writer=self.deq_backward_writer)
         self.deq_forward_writer(info)
-        assert len(z) == 1 # DELETE LATER
+        assert len(z) == 1  # DELETE LATER
         return z[-1]
 
         # z = self._init_z(x)
@@ -489,7 +581,10 @@ _blocks = {
     "prenorm_add": BlockPreNormAdd,
     "add": BlockAdd,
     "attn": BlockAttn,
+    "qkv": BlockQKV,
+    "prenorm_qkv": BlockPreNormQKV,
 }
+
 
 @register_model
 def transit_tiny_patch16_224(
@@ -509,6 +604,7 @@ def transit_tiny_patch16_224(
         **kwargs,
     )
 
+
 @register_model
 def transit_small_patch16_224(
     num_classes: int = 1000,
@@ -526,6 +622,7 @@ def transit_small_patch16_224(
         block_fn=_blocks[kwargs["block_type"]],
         **kwargs,
     )
+
 
 @register_model
 def transit_base_patch16_224(

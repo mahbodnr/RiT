@@ -38,7 +38,7 @@ class ViTBlock(nn.Module):
 class ViT(nn.Module):
     def __init__(
         self,
-        image_size=224,
+        img_size=224,
         patch_size=16,
         channels=3,
         num_classes=1000,
@@ -54,7 +54,7 @@ class ViT(nn.Module):
         self.num_features = self.embed_dim = dim
 
         self.patch_embed = PatchEmbed(
-            img_size=image_size,
+            img_size=img_size,
             patch_size=patch_size,
             in_chans=channels,
             embed_dim=dim,
