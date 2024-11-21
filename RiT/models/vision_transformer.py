@@ -1,4 +1,4 @@
-from timm.models.registry import register_model
+from timm.models import register_model
 # from .vit_pytorch.vit import ViT
 from .vit import ViT
     

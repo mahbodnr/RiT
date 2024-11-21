@@ -79,6 +79,7 @@ parser.add_argument(
         "64-true",
     ],
 )
+parser.add_argument("--gradient-clip-val", default=0.0, type=float, help="Gradient clipping value. 0 means don't clip.")
 # Augmentation
 parser.add_argument("--autoaugment", action="store_true")
 parser.add_argument("--randaugment", action="store_true")
@@ -161,8 +162,9 @@ parser.add_argument("--drop-path-rate", default=0.0, type=float)
 parser.add_argument("--weight-init", default="", type=str)
 parser.add_argument("--fix-init", action="store_true")
 # Transit:
+parser.add_argument("--n-deq-layers", default=1, type=int)
 parser.add_argument("--block-type", type=str, default="add")
-parser.add_argument("--z-init-type", type=str, default="zero", choices=["zero", "input"])
+parser.add_argument("--z-init-type", type=str, default="zero", choices=["zero", "input", "rand", "pre"])
 parser.add_argument("--f-solver", default="fixed_point_iter", type=str)
 parser.add_argument("--b-solver", default="fixed_point_iter", type=str)
 parser.add_argument("--no-stat", default=None, type=bool)
@@ -185,6 +187,23 @@ parser.add_argument("--indexing", default=None, type=int)
 parser.add_argument("--norm-type", default="weight_norm", type=str)
 parser.add_argument("--prefix-filter-out", default=None, type=str)
 parser.add_argument("--filter-out", default=None, type=str)
+parser.add_argument("--jac-reg", action="store_true")
+parser.add_argument("--jac-loss-weight", default=0.1, type=float)
+parser.add_argument("--log-sradius", action="store_true")
+parser.add_argument("--stochastic-depth-sigma", default=0.0, type=float)
+parser.add_argument("--stability-reg", action="store_true")
+parser.add_argument("--stability-reg-weight", default=1.0, type=float)
+# MOE args
+parser.add_argument("--num-experts", default=10, type=int)
+parser.add_argument("--gating-top-n", default=2, type=int)
+parser.add_argument("--threshold-train", default=0.2, type=float)
+parser.add_argument("--threshold-eval", default=0.2, type=float)
+parser.add_argument("--capacity-factor-train", default=1.25, type=float)
+parser.add_argument("--capacity-factor-eval", default=2.0, type=float)
+parser.add_argument("--balance-loss-coef", default=1e-2, type=float)
+parser.add_argument("--router-z-loss-coef", default=1e-3, type=float)
+# nViT args
+parser.add_argument("--manual-norm-weights", action="store_true")
 
 args = parser.parse_args()
 

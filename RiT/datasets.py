@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision
 import torchvision.transforms as transforms
 from torchvision.transforms import autoaugment, AutoAugmentPolicy
+from timm.data.auto_augment import rand_augment_transform
 
 
 class ImageNet64Dataset(Dataset):
@@ -103,7 +104,9 @@ class TinyImageNetDataset(Dataset):
 def get_transform(args):
     train_transform = []
     val_transform = []
-    input_size = args.dataset_image_shape[1:] if args.img_size is None else args.img_size
+    input_size = (
+        args.dataset_image_shape[1:] if args.img_size is None else args.img_size
+    )
     if type(input_size) is int:
         input_size = (input_size, input_size)
 
@@ -125,14 +128,10 @@ def get_transform(args):
         else:
             raise NotImplementedError(f"AutoAugment not implemented for {args.dataset}")
 
-    train_transform.append(
-        transforms.Resize(input_size)
-    )
+    train_transform.append(transforms.Resize(input_size))
     if args.randaugment:
         train_transform.append(
-            transforms.RandAugment(
-                num_ops=2, magnitude=9 # TODO: add arguments
-            )
+            rand_augment_transform(config_str="rand-m9-mstd0.5-inc1")
         )
     train_transform.append(
         transforms.ToTensor(),
@@ -146,8 +145,6 @@ def get_transform(args):
     if args.mean is not None:
         train_transform.append(transforms.Normalize(mean=args.mean, std=args.std))
         val_transform.append(transforms.Normalize(mean=args.mean, std=args.std))
-
-
 
     if args.random_crop:
         assert args.random_crop_size is not None, "random_crop_size is required."
@@ -265,7 +262,7 @@ def get_dataloader(args):
         args.dataset_image_shape = (3, 224, 224)
         args.mean, args.std = (
             (0.485, 0.456, 0.406),
-           (0.229, 0.224, 0.225),
+            (0.229, 0.224, 0.225),
         )
         train_transform, val_transform = get_transform(args)
         train_ds = torchvision.datasets.ImageNet(
@@ -287,7 +284,7 @@ def get_dataloader(args):
         args.dataset_image_shape = (3, 64, 64)
         args.mean, args.std = (
             (0.485, 0.456, 0.406),
-           (0.229, 0.224, 0.225),
+            (0.229, 0.224, 0.225),
         )
         train_transform, val_transform = get_transform(args)
         train_ds = ImageNet64Dataset(
@@ -307,7 +304,7 @@ def get_dataloader(args):
         args.dataset_image_shape = (3, 64, 64)
         args.mean, args.std = (
             (0.485, 0.456, 0.406),
-           (0.229, 0.224, 0.225),
+            (0.229, 0.224, 0.225),
         )
         train_transform, val_transform = get_transform(args)
         train_ds = TinyImageNetDataset(

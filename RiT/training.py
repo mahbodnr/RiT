@@ -72,6 +72,9 @@ def train(args):
         print("[INFO] Log with CSV")
         logger = pl.loggers.CSVLogger(save_dir="logs", name=experiment_name)
 
+    if args.jac_reg:
+        os.environ["TIMM_FUSED_ATTN"] = "0"
+
     # Set up model
     assert args.model_name is not None, "Model name is required."
     net = Net(args)
@@ -114,6 +117,7 @@ def train(args):
         enable_model_summary=False,  # Implemented seperately inside the Trainer
         profiler=profiler,
         accumulate_grad_batches=args.accumulate_grad_batches,
+        gradient_clip_val=args.gradient_clip_val,
     )
 
     # Train model

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 from timm.models.vision_transformer import Attention
 from timm.layers import PatchEmbed, Mlp, trunc_normal_
-from timm.models.registry import register_model
+from timm.models import register_model
 
 from timm.models.vision_transformer import Block as ViTBlock
 

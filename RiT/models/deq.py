@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch.jit import Final
 
 from timm.models.vision_transformer import VisionTransformer
-from timm.models.registry import register_model
+from timm.models import register_model
 from timm.layers import (
     PatchEmbed,
     Mlp,
@@ -29,7 +29,9 @@ from timm.layers import (
     use_fused_attn,
 )
 
-from torchdeq import get_deq
+from RiT.models.vit_moe import MoE, BlockMoE
+from RiT.models.normalized_vit import nViTBlock, nViTBlock2, L2Norm, NormLinear
+from torchdeq import get_deq, jac_reg
 from torchdeq.norm import apply_norm, reset_norm
 
 
@@ -95,9 +97,11 @@ class Attention(nn.Module):
 class AttentionInj(Attention):
     def forward(self, x: torch.Tensor, injection: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
-        qkv = (self.qkv(x) + injection.repeat(1, 1, 3)).reshape(
-            B, N, 3, self.num_heads, self.head_dim
-        ).permute(2, 0, 3, 1, 4)
+        qkv = (
+            (self.qkv(x) + injection.repeat(1, 1, 3))
+            .reshape(B, N, 3, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
 
@@ -269,6 +273,7 @@ class BlockQKV(Block):
         x = self.norm2(x)
         return x
 
+
 class BlockPreNormQKV(BlockQKV):
     def forward(
         self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
@@ -278,6 +283,7 @@ class BlockPreNormQKV(BlockQKV):
         x = self.norm2(x)
         x = x + self.mlp(x)
         return x
+
 
 class Transit(VisionTransformer):
     """
@@ -321,6 +327,7 @@ class Transit(VisionTransformer):
         block_fn: Type[nn.Module] = Block,
         mlp_layer: Type[nn.Module] = Mlp,
         # DEQ specific args
+        n_deq_layers: int = 1,
         z_init_type: str = "zero",
         f_solver: str = "fixed_point_iter",
         b_solver: str = "fixed_point_iter",
@@ -344,6 +351,12 @@ class Transit(VisionTransformer):
         norm_type: Optional[str] = "weight_norm",
         prefix_filter_out: Optional[Union[str, List[str]]] = None,
         filter_out: Optional[Union[str, List[str]]] = None,
+        jac_reg: bool = False,
+        jac_loss_weight: float = 0.1,
+        log_sradius: bool = True,
+        stochastic_depth_sigma: float = 0.0,
+        stability_reg: bool = False,
+        stability_reg_weight: float = 0.1,
         logger=None,
         **kwargs: Any,
     ) -> None:
@@ -445,34 +458,47 @@ class Transit(VisionTransformer):
         )
         assert drop_path_rate == 0, "drop path not supported in Vision Transformer"
         assert init_values is None, "init values not supported in Vision Transformer"
-        assert z_init_type in ("zero", "input"), "Invalid z_init_type"
+        assert z_init_type in ("zero", "input", "rand", "pre"), "Invalid z_init_type"
+        if z_init_type == "pre":
+            self.pre_z = None
         self.logger = logger
         self.z_init_type = z_init_type
+        self.jac_reg = jac_reg
+        self.jac_loss_weight = jac_loss_weight
+        self.deq_grad_steps = grad
+        self.sradius_mode = log_sradius
+        self.stochastic_depth_sigma = stochastic_depth_sigma
+        self.stability_reg = stability_reg
+        self.stability_reg_weight = stability_reg_weight
         norm_layer = get_norm_layer(norm_layer) or partial(nn.LayerNorm, eps=1e-6)
         act_layer = get_act_layer(act_layer) or nn.GELU
 
-        self.blocks = nn.Sequential(
-            *[
-                block_fn(
-                    dim=embed_dim,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    qk_norm=qk_norm,
-                    init_values=init_values,
-                    proj_drop=proj_drop_rate,
-                    attn_drop=attn_drop_rate,
-                    drop_path=drop_path_rate,
-                    norm_layer=norm_layer,
-                    act_layer=act_layer,
-                    mlp_layer=mlp_layer,
+        del self.blocks
+        self.deq_layers = nn.ModuleList()
+        for i in range(n_deq_layers):
+            self.deq_layers.append(
+                nn.Sequential(
+                    *[
+                        block_fn(
+                            dim=embed_dim,
+                            num_heads=num_heads,
+                            mlp_ratio=mlp_ratio,
+                            qkv_bias=qkv_bias,
+                            qk_norm=qk_norm,
+                            init_values=init_values,
+                            proj_drop=proj_drop_rate,
+                            attn_drop=attn_drop_rate,
+                            drop_path=drop_path_rate,
+                            norm_layer=norm_layer,
+                            act_layer=act_layer,
+                            mlp_layer=mlp_layer,
+                        )
+                        for i in range(depth)
+                    ]
                 )
-                for i in range(depth)
-            ]
-        )
-
+            )
         self.injection_transform = nn.Linear(embed_dim, embed_dim)
-        self.deq = get_deq(
+        self.deq_kwargs = dict(
             f_solver=f_solver,
             b_solver=b_solver,
             no_stat=no_stat,
@@ -493,22 +519,25 @@ class Transit(VisionTransformer):
             n_states=n_states,
             # indexing=indexing,
         )
+        self.deq = get_deq(self.deq_kwargs)
 
         apply_norm(
-            self.blocks,
+            self.deq_layers,
             norm_type=norm_type,
             prefix_filter_out=prefix_filter_out,
             filter_out=filter_out,
         )
 
-    def deq_forward_writer(self, info):
+
+    def deq_forward_writer(self, info, i=0):
+        # print(info)
         if self.logger is not None:
+            if info["nstep"].mean() == 0:
+                return
             for key in ("abs_lowest", "rel_lowest", "nstep"):
-                if key == "nstep" and info[key].mean() == 0:
-                    continue
-                if info[key].mean() == 1e8:
-                    continue
-                self.logger(f"Forward/{key}", info[key].mean())
+                self.logger(f"Forward/{i}/{key}", info[key].mean())
+            if "sradius" in info and info["sradius"].mean() != -1:
+                self.logger(f"Forward/{i}/sradius", info["sradius"].mean())
 
     def deq_backward_writer(self, info):
         if self.logger is not None:
@@ -519,40 +548,128 @@ class Transit(VisionTransformer):
     def set_grad_checkpointing(self, enable: bool = True) -> None:
         raise NotImplementedError("grad_checkpointing is not available for DEQ models")
 
+    @staticmethod
+    def deq_func(z, blocks, injection):
+        for block in blocks:
+            z = (
+                block(z, injection=injection)
+                if isinstance(block, Block)
+                else block(z + injection)
+            )
+        return z
+
     def _intermediate_layers(
         self,
         x: torch.Tensor,
-        n: Union[int, Sequence] = 1,
+        n: Union[int, Sequence] = -1,
+        max_iter: Union[int, None] = None,
     ) -> List[torch.Tensor]:
-        outputs, num_blocks = [], len(self.blocks)
-        take_indices = set(
-            range(num_blocks - n, num_blocks) if isinstance(n, int) else n
+
+        outputs = []
+        if max_iter is None:
+            max_iter = self.deq.f_max_iter
+
+        # forward pass
+        x = self.patch_embed(x)
+        x = self._pos_embed(x)
+        x = self.patch_drop(x)
+        x = self.norm_pre(x)
+        # run deq:
+        u_inj = self.injection(x)
+
+        z = self._init_z(x)
+        indexing_deq = get_deq(
+            args=self.deq.__dict__,
+            core="indexing",
+            indexing=n,
+            f_solver="simple_fixed_point_iter",
+            b_solver="simple_fixed_point_iter",
         )
-        raise NotImplementedError("Not Implemented Yet for DEQ")
+        for _, blocks in enumerate(self.deq_layers):
+            z, info = indexing_deq(
+                partial(self.deq_func, blocks=blocks, injection=u_inj),
+                z,
+                solver_kwargs={
+                    "f_max_iter": max_iter,
+                },
+            )
+            outputs.append(z)
+
+        return outputs
 
     def _init_z(self, x: torch.Tensor) -> torch.Tensor:
         if self.z_init_type == "zero":
             return torch.zeros_like(x)
         elif self.z_init_type == "input":
             return x
+        elif self.z_init_type == "rand":
+            return torch.randn_like(x)
+        elif self.z_init_type == "pre":
+            if self.training or self.pre_z is None:
+                return torch.zeros_like(x)
+            # Shuffle pre_z and match the batch size
+            pre_z = self.pre_z[torch.randperm(x.size(0))]
+            return pre_z.detach()
+        else:
+            raise ValueError(f"Unknown z_init_type {self.z_init_type}")
 
     def injection(self, x: torch.Tensor) -> torch.Tensor:
         return self.injection_transform(x)
 
     def run_deq(self, x: torch.Tensor) -> torch.Tensor:
-        reset_norm(self.blocks)
+        reset_norm(self.deq_layers)
         u_inj = self.injection(x)
 
-        def deq_func(z):
-            for block in self.blocks:
-                z = block(z, injection=u_inj)
-            return z
+        z = self._init_z(x)
+        for i, blocks in enumerate(self.deq_layers):
+            if self.stochastic_depth_sigma > 0:
+                assert (
+                    self.deq_kwargs["f_max_iter"] == 0
+                ), "Stochastic depth not implemented for f_max_iter > 0"
 
-        z_init = self._init_z(x)
-        z, info = self.deq(deq_func, z_init, writer=self.deq_backward_writer)
-        self.deq_forward_writer(info)
-        assert len(z) == 1  # DELETE LATER
-        return z[-1]
+                stochastic_steps = (
+                    self.deq_kwargs["grad"]
+                    + torch.randn(1, device=x.device)
+                    * self.stochastic_depth_sigma
+                ).clamp(min=1).int().item()
+                deq = get_deq(
+                    {
+                        **self.deq_kwargs,
+                        "grad": stochastic_steps,
+                    }
+                )
+                deq.train(self.training)
+            else:
+                deq = self.deq
+
+            z, info = deq(
+                partial(self.deq_func, blocks=blocks, injection=u_inj),
+                z,
+                writer=self.deq_backward_writer,
+                sradius_mode=self.sradius_mode,
+            )
+            self.deq_forward_writer(info, i)
+            z = z[-1]
+
+        if self.training and self.jac_reg:
+            self.jac_loss = (
+                jac_reg(
+                    z,
+                    self.deq_func(z, blocks=blocks, injection=u_inj),
+                )
+                * self.jac_loss_weight
+            )
+
+        if self.z_init_type == "pre":
+            self.pre_z = z.clone().detach()
+
+        if self.stability_reg:
+            self.stability_loss = F.kl_div(
+                F.log_softmax(z, dim=-1),
+                F.softmax(self.deq_func(z, blocks=blocks, injection=u_inj), dim=-1),
+            ) * self.stability_reg_weight
+
+        return z
 
         # z = self._init_z(x)
         # for t in range(self.deq.f_max_iter):
@@ -573,6 +690,333 @@ class Transit(VisionTransformer):
         x = self.forward_features(x)
         x = self.forward_head(x)
         return x
+
+
+class TransitMoE(Transit):
+    def __init__(
+        self,
+        img_size: Union[int, Tuple[int, int]] = 224,
+        patch_size: Union[int, Tuple[int, int]] = 16,
+        in_chans: int = 3,
+        num_classes: int = 1000,
+        global_pool: Literal["", "avg", "token", "map"] = "token",
+        embed_dim: int = 768,
+        depth: int = 1,
+        num_heads: int = 12,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        qk_norm: bool = False,
+        init_values: Optional[float] = None,
+        class_token: bool = True,
+        no_embed_class: bool = False,
+        reg_tokens: int = 0,
+        pre_norm: bool = False,
+        fc_norm: Optional[bool] = None,
+        dynamic_img_size: bool = False,
+        dynamic_img_pad: bool = False,
+        drop_rate: float = 0.0,
+        pos_drop_rate: float = 0.0,
+        patch_drop_rate: float = 0.0,
+        proj_drop_rate: float = 0.0,
+        attn_drop_rate: float = 0.0,
+        drop_path_rate: float = 0.0,
+        weight_init: Literal["skip", "jax", "jax_nlhb", "moco", ""] = "",
+        fix_init: bool = False,
+        embed_layer: Callable = PatchEmbed,
+        norm_layer: Optional[LayerType] = None,
+        act_layer: Optional[LayerType] = None,
+        block_fn: Type[nn.Module] = Block,
+        mlp_layer: Type[nn.Module] = Mlp,
+        # DEQ specific args
+        n_deq_layers: int = 1,
+        z_init_type: str = "zero",
+        f_solver: str = "fixed_point_iter",
+        b_solver: str = "fixed_point_iter",
+        no_stat: Optional[bool] = None,
+        f_max_iter: int = 40,
+        b_max_iter: int = 40,
+        f_tol: float = 1e-3,
+        b_tol: float = 1e-6,
+        f_stop_mode: str = "abs",
+        b_stop_mode: str = "abs",
+        eval_factor: float = 1.0,
+        eval_f_max_iter: int = 0,
+        ift: bool = False,
+        hook_ift: bool = False,
+        grad: int = 1,
+        tau: float = 1.0,
+        sup_gap: int = -1,
+        sup_loc: Optional[int] = None,
+        n_states: int = 1,
+        indexing: Optional[int] = None,
+        norm_type: Optional[str] = "weight_norm",
+        prefix_filter_out: Optional[Union[str, List[str]]] = None,
+        filter_out: Optional[Union[str, List[str]]] = None,
+        logger=None,
+        # MOE specific args
+        num_experts: int = 10,
+        gating_top_n: int = 2,
+        threshold_train: float = 0.2,
+        threshold_eval: float = 0.2,
+        capacity_factor_train: float = 1.25,
+        capacity_factor_eval: float = 2.0,
+        balance_loss_coef: float = 1e-2,
+        router_z_loss_coef: float = 1e-3,
+        **kwargs: Any,
+    ) -> None:
+
+        moe = partial(
+            MoE,
+            num_experts=num_experts,
+            expert_hidden_mult=mlp_ratio,
+            gating_top_n=gating_top_n,
+            threshold_train=threshold_train,
+            threshold_eval=threshold_eval,
+            capacity_factor_train=capacity_factor_train,
+            capacity_factor_eval=capacity_factor_eval,
+            balance_loss_coef=balance_loss_coef,
+            router_z_loss_coef=router_z_loss_coef,
+        )
+        super().__init__(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            num_classes=num_classes,
+            global_pool=global_pool,
+            embed_dim=embed_dim,
+            depth=depth,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            init_values=init_values,
+            class_token=class_token,
+            no_embed_class=no_embed_class,
+            reg_tokens=reg_tokens,
+            pre_norm=pre_norm,
+            fc_norm=fc_norm,
+            dynamic_img_size=dynamic_img_size,
+            dynamic_img_pad=dynamic_img_pad,
+            drop_rate=drop_rate,
+            pos_drop_rate=pos_drop_rate,
+            patch_drop_rate=patch_drop_rate,
+            proj_drop_rate=proj_drop_rate,
+            attn_drop_rate=attn_drop_rate,
+            drop_path_rate=drop_path_rate,
+            weight_init=weight_init,
+            fix_init=fix_init,
+            embed_layer=embed_layer,
+            norm_layer=norm_layer,
+            act_layer=act_layer,
+            block_fn=BlockMoE,
+            mlp_layer=moe,
+            n_deq_layers=n_deq_layers,
+            z_init_type=z_init_type,
+            f_solver=f_solver,
+            b_solver=b_solver,
+            no_stat=no_stat,
+            f_max_iter=f_max_iter,
+            b_max_iter=b_max_iter,
+            f_tol=f_tol,
+            b_tol=b_tol,
+            f_stop_mode=f_stop_mode,
+            b_stop_mode=b_stop_mode,
+            eval_factor=eval_factor,
+            eval_f_max_iter=eval_f_max_iter,
+            ift=ift,
+            hook_ift=hook_ift,
+            grad=grad,
+            tau=tau,
+            sup_gap=sup_gap,
+            sup_loc=sup_loc,
+            n_states=n_states,
+            indexing=indexing,
+            norm_type=norm_type,
+            prefix_filter_out=prefix_filter_out,
+            filter_out=filter_out,
+            logger=logger,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = super().forward(x)
+        self.aux_loss = sum([block.total_aux_loss for block in self.blocks]) / len(
+            self.blocks
+        )
+        return x
+
+
+class nTransit(Transit):
+    """
+    Vision Transformer with support for DEQ.
+    """
+
+    dynamic_img_size: Final[bool]
+
+    def __init__(
+        self,
+        img_size: Union[int, Tuple[int, int]] = 224,
+        patch_size: Union[int, Tuple[int, int]] = 16,
+        in_chans: int = 3,
+        num_classes: int = 1000,
+        global_pool: Literal["", "avg", "token", "map"] = "token",
+        embed_dim: int = 768,
+        depth: int = 1,
+        num_heads: int = 12,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        qk_norm: bool = False,
+        init_values: Optional[float] = None,
+        class_token: bool = True,
+        no_embed_class: bool = False,
+        reg_tokens: int = 0,
+        pre_norm: bool = False,
+        fc_norm: Optional[bool] = None,
+        dynamic_img_size: bool = False,
+        dynamic_img_pad: bool = False,
+        drop_rate: float = 0.0,
+        pos_drop_rate: float = 0.0,
+        patch_drop_rate: float = 0.0,
+        proj_drop_rate: float = 0.0,
+        attn_drop_rate: float = 0.0,
+        drop_path_rate: float = 0.0,
+        weight_init: Literal["skip", "jax", "jax_nlhb", "moco", ""] = "",
+        fix_init: bool = False,
+        embed_layer: Callable = PatchEmbed,
+        norm_layer: Optional[LayerType] = None,
+        act_layer: Optional[LayerType] = None,
+        block_fn: Type[nn.Module] = Block,
+        mlp_layer: Type[nn.Module] = Mlp,
+        # DEQ specific args
+        n_deq_layers: int = 1,
+        z_init_type: str = "zero",
+        f_solver: str = "fixed_point_iter",
+        b_solver: str = "fixed_point_iter",
+        no_stat: Optional[bool] = None,
+        f_max_iter: int = 40,
+        b_max_iter: int = 40,
+        f_tol: float = 1e-3,
+        b_tol: float = 1e-6,
+        f_stop_mode: str = "abs",
+        b_stop_mode: str = "abs",
+        eval_factor: float = 1.0,
+        eval_f_max_iter: int = 0,
+        ift: bool = False,
+        hook_ift: bool = False,
+        grad: int = 1,
+        tau: float = 1.0,
+        sup_gap: int = -1,
+        sup_loc: Optional[int] = None,
+        n_states: int = 1,
+        indexing: Optional[int] = None,
+        norm_type: Optional[str] = "weight_norm",
+        prefix_filter_out: Optional[Union[str, List[str]]] = None,
+        filter_out: Optional[Union[str, List[str]]] = None,
+        d: bool = False,
+        jac_loss_weight: float = 0.1,
+        logger=None,
+        # nTransformer args
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            num_classes=num_classes,
+            global_pool=global_pool,
+            embed_dim=embed_dim,
+            depth=depth,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            init_values=init_values,
+            class_token=class_token,
+            no_embed_class=no_embed_class,
+            reg_tokens=reg_tokens,
+            pre_norm=pre_norm,
+            fc_norm=fc_norm,
+            dynamic_img_size=dynamic_img_size,
+            dynamic_img_pad=dynamic_img_pad,
+            drop_rate=drop_rate,
+            pos_drop_rate=pos_drop_rate,
+            patch_drop_rate=patch_drop_rate,
+            proj_drop_rate=proj_drop_rate,
+            attn_drop_rate=attn_drop_rate,
+            drop_path_rate=drop_path_rate,
+            weight_init=weight_init,
+            fix_init=fix_init,
+            embed_layer=embed_layer,
+            norm_layer=norm_layer,
+            act_layer=act_layer,
+            block_fn=block_fn,
+            mlp_layer=mlp_layer,
+            n_deq_layers=n_deq_layers,
+            z_init_type=z_init_type,
+            f_solver=f_solver,
+            b_solver=b_solver,
+            no_stat=no_stat,
+            f_max_iter=f_max_iter,
+            b_max_iter=b_max_iter,
+            f_tol=f_tol,
+            b_tol=b_tol,
+            f_stop_mode=f_stop_mode,
+            b_stop_mode=b_stop_mode,
+            eval_factor=eval_factor,
+            eval_f_max_iter=eval_f_max_iter,
+            ift=ift,
+            hook_ift=hook_ift,
+            grad=grad,
+            tau=tau,
+            sup_gap=sup_gap,
+            sup_loc=sup_loc,
+            n_states=n_states,
+            indexing=indexing,
+            norm_type=norm_type,
+            prefix_filter_out=prefix_filter_out,
+            filter_out=filter_out,
+            logger=logger,
+        )
+
+        self.deq_layers = nn.ModuleList()
+        for i in range(n_deq_layers):
+            self.deq_layers.append(
+                nn.Sequential(
+                    *[
+                        nViTBlock2(
+                            embed_dim=embed_dim,
+                            dim_head=embed_dim // num_heads,
+                            num_heads=num_heads,
+                            mlp_ratio=mlp_ratio,
+                            dropout=drop_rate,
+                            residual_lerp_scale_init=1
+                            / (self.deq.f_max_iter + self.deq_grad_steps),
+                        )
+                        for _ in range(depth)
+                    ]
+                )
+            )
+
+        self.scale = embed_dim**0.5
+        self.pre_norm = L2Norm(embed_dim)
+        self.norm = nn.Identity()
+        self.head = NormLinear(embed_dim, num_classes)
+        self.logit_scale = nn.Parameter(torch.ones(num_classes))
+
+        self.norm_weights_()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return super().forward(x) * self.logit_scale * self.scale
+
+    @torch.no_grad()
+    def norm_weights_(self):
+        for module in self.modules():
+            if not isinstance(module, NormLinear):
+                continue
+
+            normed = module.weight
+            original = module.linear.parametrizations.weight.original
+
+            original.copy_(normed)
 
 
 _blocks = {
@@ -632,6 +1076,100 @@ def transit_base_patch16_224(
 ) -> Transit:
     assert not pretrained, "Pretrained model not available for this configuration"
     return Transit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=768,
+        num_heads=12,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
+
+
+@register_model
+def transit_large_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> Transit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return Transit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=1024,
+        num_heads=16,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
+
+
+@register_model
+def transit_moe_tiny_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> TransitMoE:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return TransitMoE(
+        img_size=224,
+        patch_size=16,
+        embed_dim=192,
+        num_heads=3,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
+
+
+@register_model
+def ntransit_tiny_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> nTransit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return nTransit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=192,
+        num_heads=3,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
+
+
+@register_model
+def ntransit_small_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> nTransit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return nTransit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=384,
+        num_heads=6,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
+
+@register_model
+def ntransit_base_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> nTransit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return nTransit(
         img_size=224,
         patch_size=16,
         embed_dim=768,

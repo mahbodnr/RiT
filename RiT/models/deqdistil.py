@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.jit import Final
 
 from timm.models.deit import VisionTransformerDistilled
-from timm.models.registry import register_model
+from timm.models import register_model
 
 from .deq import Transit, _blocks
 
@@ -15,7 +15,7 @@ class TransitDistilled(Transit, VisionTransformerDistilled):
     """Transit distilled model."""
 
 @register_model
-def transit_distil_tiny_patch16_224(
+def transit_tiny_distil_patch16_224(
     num_classes: int = 1000,
     pretrained: bool = False,
     **kwargs: Any,
@@ -33,7 +33,7 @@ def transit_distil_tiny_patch16_224(
     )
 
 @register_model
-def transit_distil_small_patch16_224(
+def transit_small_distil_patch16_224(
     num_classes: int = 1000,
     pretrained: bool = False,
     **kwargs: Any,
