@@ -127,7 +127,6 @@ class FixedpointWeightedCrossEntropyLoss(nn.Module):
             # fixed-point loss:
             if i < preds.size(0) - 1:
                 loss = loss + self.lambda_ * (F.mse_loss(preds[i], preds[i + 1], reduce=False).mean(-1) * weight[i]).mean()
-            # print("losses:", loss, fp_loss)
         return loss
 
 class FixedpointWeightedCrossEntropyLoss(nn.Module):

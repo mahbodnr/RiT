@@ -35,25 +35,35 @@ parser.add_argument(
     dest="opt"
 )
 parser.add_argument("--weight-decay", default=0.0, type=float)
-parser.add_argument("--lr", default=1e-3, type=float)
 parser.add_argument("--beta1", default=0.9, type=float)
 parser.add_argument("--beta2", default=0.999, type=float)
 parser.add_argument("--momentum", default=0.9, type=float)
-# Learning rate scheduler
-parser.add_argument(
-    "--lr-scheduler",
-    default=None,
-    type=str,
-    choices=["cosine", "cosine_restart", "reduce_on_plateau"],
-)
-parser.add_argument(
-    "--lr-warmup-epochs",
-    default=0,
-    type=int,
-    help="Number of warmup epochs for the learning rate. Set to 0 to disable warmup.",
-)
-parser.add_argument("--min-lr", default=1e-5, type=float)
-parser.add_argument("--lr-scheduler-stop-epoch", default=None, type=int)
+# Learning rate schedule parameters
+parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
+                    help='LR scheduler (default: "cosine"')
+parser.add_argument('--lr', type=float, default=5e-4, metavar='LR',
+                    help='learning rate (default: 5e-4)')
+parser.add_argument('--lr-noise', type=float, nargs='+', default=None, metavar='pct, pct',
+                    help='learning rate noise on/off epoch percentages')
+parser.add_argument('--lr-noise-pct', type=float, default=0.67, metavar='PERCENT',
+                    help='learning rate noise limit percent (default: 0.67)')
+parser.add_argument('--lr-noise-std', type=float, default=1.0, metavar='STDDEV',
+                    help='learning rate noise std-dev (default: 1.0)')
+parser.add_argument('--warmup-lr', type=float, default=1e-4, metavar='LR',
+                    help='warmup learning rate (default: 1e-4)')
+parser.add_argument('--min-lr', type=float, default=1e-5, metavar='LR',
+                    help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
+parser.add_argument('--decay-epochs', type=float, default=30, metavar='N',
+                    help='epoch interval to decay LR')
+parser.add_argument('--warmup-epochs', type=int, default=5, metavar='N',
+                    help='epochs to warmup LR, if scheduler supports')
+parser.add_argument('--cooldown-epochs', type=int, default=10, metavar='N',
+                    help='epochs to cooldown LR at min_lr, after cyclic schedule ends')
+parser.add_argument('--patience-epochs', type=int, default=10, metavar='N',
+                    help='patience epochs for Plateau LR scheduler (default: 10')
+parser.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RATE',
+                    help='LR decay rate (default: 0.1)')
+
 
 parser.add_argument(
     "--off-benchmark",
@@ -61,7 +71,7 @@ parser.add_argument(
     dest="trainer_benchmark",
     help="The value (True or False) to set torch.backends.cudnn.benchmark to. The value for torch.backends.cudnn.benchmark set in the current session will be used (False if not manually set). If deterministic is set to True, this will default to False. You can read more about the interaction of torch.backends.cudnn.benchmark and torch.backends.cudnn.deterministic. Setting this flag to True can increase the speed of your system if your input sizes don’t change. However, if they do, then it might make your system slower. The CUDNN auto-tuner will try to find the best algorithm for the hardware when a new input size is encountered. This might also increase the memory usage.",
 )
-parser.add_argument("--max-epochs", default=100, type=int)
+parser.add_argument("--num-epochs", default=100, type=int)
 parser.add_argument(
     "--precision",
     default="32-true",
@@ -162,9 +172,22 @@ parser.add_argument("--drop-path-rate", default=0.0, type=float)
 parser.add_argument("--weight-init", default="", type=str)
 parser.add_argument("--fix-init", action="store_true")
 # Transit:
+parser.add_argument("--iterations", default=12, type=int)
 parser.add_argument("--n-deq-layers", default=1, type=int)
-parser.add_argument("--block-type", type=str, default="add")
+parser.add_argument("--block-type", type=str, default="prenorm_add")
 parser.add_argument("--z-init-type", type=str, default="zero", choices=["zero", "input", "rand", "pre"])
+parser.add_argument("--norm-type", default="none", type=str)
+parser.add_argument("--prefix-filter-out", default=None, type=str)
+parser.add_argument("--filter-out", default=None, type=str)
+parser.add_argument("--jac-reg", action="store_true")
+parser.add_argument("--jac-loss-weight", default=0.1, type=float)
+parser.add_argument("--log-sradius", action="store_true")
+parser.add_argument("--stochastic-depth-sigma", default=0.0, type=float)
+parser.add_argument("--stability-reg", action="store_true")
+parser.add_argument("--stability-reg-weight", default=1.0, type=float)
+parser.add_argument("--trajectory-loss-steps", default=0, type=int)
+parser.add_argument("--update-rate", default=1.0, type=float)
+# deq args
 parser.add_argument("--f-solver", default="fixed_point_iter", type=str)
 parser.add_argument("--b-solver", default="fixed_point_iter", type=str)
 parser.add_argument("--no-stat", default=None, type=bool)
@@ -184,15 +207,6 @@ parser.add_argument("--sup-gap", default=-1, type=int)
 parser.add_argument("--sup-loc", default=None, type=int)
 parser.add_argument("--n-states", default=1, type=int)
 parser.add_argument("--indexing", default=None, type=int)
-parser.add_argument("--norm-type", default="weight_norm", type=str)
-parser.add_argument("--prefix-filter-out", default=None, type=str)
-parser.add_argument("--filter-out", default=None, type=str)
-parser.add_argument("--jac-reg", action="store_true")
-parser.add_argument("--jac-loss-weight", default=0.1, type=float)
-parser.add_argument("--log-sradius", action="store_true")
-parser.add_argument("--stochastic-depth-sigma", default=0.0, type=float)
-parser.add_argument("--stability-reg", action="store_true")
-parser.add_argument("--stability-reg-weight", default=1.0, type=float)
 # MOE args
 parser.add_argument("--num-experts", default=10, type=int)
 parser.add_argument("--gating-top-n", default=2, type=int)

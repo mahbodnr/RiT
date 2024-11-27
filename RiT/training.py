@@ -112,7 +112,7 @@ def train(args):
         devices=args.gpus if args.gpus else "auto",
         benchmark=args.trainer_benchmark,
         logger=logger,
-        max_epochs=args.max_epochs,
+        max_epochs=None,
         callbacks=[checkpoint_callback],
         enable_model_summary=False,  # Implemented seperately inside the Trainer
         profiler=profiler,

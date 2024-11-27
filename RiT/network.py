@@ -5,14 +5,17 @@ import wandb
 from tqdm import tqdm
 
 from timm.optim import create_optimizer_v2, optimizer_kwargs
+from timm.scheduler import create_scheduler
 from timm.models import create_model
 
 from RiT.models import *
-from RiT.utils import get_criterion, get_scheduler, get_layer_outputs
+from RiT.utils import get_criterion, get_layer_outputs
 from RiT.augmentation import CutMix, MixUp
 
 from RiT.models.repeat_transformer import RiTHalt, SimpleRiT2
 import matplotlib.pyplot as plt
+from pytorch_lightning.utilities.exceptions import MisconfigurationException
+
 
 
 class Net(pl.LightningModule):
@@ -58,29 +61,11 @@ class Net(pl.LightningModule):
                 {
                     k: self.hparams.get(k, None)
                     for k in [
+                        "iterations",
                         "n_deq_layers",
                         "depth",
                         "block_type",
                         "z_init_type",
-                        "f_solver",
-                        "b_solver",
-                        "no_stat",
-                        "f_max_iter",
-                        "b_max_iter",
-                        "f_tol",
-                        "b_tol",
-                        "f_stop_mode",
-                        "b_stop_mode",
-                        "eval_factor",
-                        "eval_f_max_iter",
-                        "ift",
-                        "hook_ift",
-                        "grad",
-                        "tau",
-                        "sup_gap",
-                        "sup_loc",
-                        "n_states",
-                        "indexing",
                         "norm_type",
                         "prefix_filter_out",
                         "filter_out",
@@ -90,6 +75,7 @@ class Net(pl.LightningModule):
                         "stochastic_depth_sigma",
                         "stability_reg",
                         "stability_reg_weight",
+                        "update_rate",
                     ]
                 }
             )
@@ -141,7 +127,10 @@ class Net(pl.LightningModule):
             start = time.time()
             result = func(self, *args, **kwargs)
             end = time.time()
-            self.log(f"{func.__name__}_time", end - start)
+            try:
+                self.log(f"{func.__name__}_time", end - start)
+            except MisconfigurationException:
+                pass
             return result
 
         return wrapper
@@ -195,7 +184,9 @@ class Net(pl.LightningModule):
             self, param_group_fn=param_group_fn, **optimizer_kwargs(cfg=self.hparams)
         )
 
-        self.scheduler = get_scheduler(self.optimizer, self.hparams)
+        self.scheduler, self.hparams.num_epochs = create_scheduler(self.hparams, self.optimizer)
+        # save new num_epochs
+        self.save_hyperparameters({"num_epochs": self.hparams.num_epochs})
 
         if self.scheduler is None:
             return self.optimizer
@@ -204,6 +195,9 @@ class Net(pl.LightningModule):
             "lr_scheduler": self.scheduler,
             "monitor": "train_loss",
         }
+
+    def lr_scheduler_step(self, scheduler, metric):
+        scheduler.step(self.trainer.current_epoch)
 
     def on_fit_start(self):
         self.print_model_summary()
@@ -281,6 +275,58 @@ class Net(pl.LightningModule):
                 )
 
     def _step(self, img, label):
+        if self.hparams.trajectory_loss_steps > 0:
+            assert self.hparams.n_deq_layers == 1
+            if self.hparams.cutmix or self.hparams.mixup:
+                img, label, rand_label, lambda_ = self.cutmix_mixup(img, label)
+                assert (
+                    not self.hparams.use_distill_token
+                ), "Trajectory loss is not compatible with distillation token."
+                out_steps = self.model._intermediate_layers(
+                    img,
+                    n=list(
+                        range(
+                            self.hparams.iterations - self.hparams.trajectory_loss_steps,  self.hparams.iterations
+                        )
+                    ),
+                )[0]
+
+                loss_kwargs = {}
+                for key in ["aux_loss", "jac_loss", "stability_loss"]:
+                    if hasattr(self.model, key):
+                        val = getattr(self.model, key)
+                        if val != 0:
+                            loss_kwargs[key] = val
+                            self.log(key, val)
+
+                loss = 0
+                for out_step in out_steps:
+                    out = self.model.forward_head(self.model.norm(out_step))
+                    loss += (
+                        self.calculate_loss(
+                            out,
+                            label,
+                            img,
+                            **loss_kwargs,
+                        )
+                        * lambda_
+                    ) + (
+                        self.calculate_loss(
+                            out,
+                            rand_label,
+                            img,
+                            **loss_kwargs,
+                        )
+                        * (1.0 - lambda_)
+                    )
+                loss /= self.hparams.trajectory_loss_steps
+            else:
+                raise NotImplementedError(
+                    "trajectory_loss_steps is not implemented for no cutmix or mixup."
+                )
+            
+            return out, loss
+
         if self.hparams.cutmix or self.hparams.mixup:
             img, label, rand_label, lambda_ = self.cutmix_mixup(img, label)
             if self.hparams.use_distill_token:
@@ -289,9 +335,9 @@ class Net(pl.LightningModule):
                 out = self(img)
                 distill_token = None
 
-            loss_kwargs = {}
+            loss_kwargs = {"distill_token": distill_token}
             for key in ["aux_loss", "jac_loss", "stability_loss"]:
-                if hasattr(self.model, key) :
+                if hasattr(self.model, key):
                     val = getattr(self.model, key)
                     if val != 0:
                         loss_kwargs[key] = val
@@ -302,7 +348,6 @@ class Net(pl.LightningModule):
                     out,
                     label,
                     img,
-                    distill_token=distill_token,
                     **loss_kwargs,
                 )
                 * lambda_
@@ -311,13 +356,16 @@ class Net(pl.LightningModule):
                     out,
                     rand_label,
                     img,
-                    distill_token=distill_token,
                     **loss_kwargs,
                 )
                 * (1.0 - lambda_)
             )
         else:
-            if self.hparams.use_distill_token or  hasattr(self.model, "aux_loss") or hasattr(self.model, "jac_loss"):
+            if (
+                self.hparams.use_distill_token
+                or hasattr(self.model, "aux_loss")
+                or hasattr(self.model, "jac_loss")
+            ):
                 raise NotImplementedError()
             out = self(img)
             loss = self.calculate_loss(out, label, img)
@@ -356,12 +404,15 @@ class Net(pl.LightningModule):
         if self.hparams.log_layer_outputs:
             self.log_layer_outputs()
 
+        if self.current_epoch == self.hparams.num_epochs:
+            self.trainer.should_stop = True
+
     def optimizer_step(self, *args, **kwargs):
         """
         Add weight normalization, etc here.
         """
         super().optimizer_step(*args, **kwargs)
-        
+
         if hasattr(self.model, "norm_weights_"):
             self.model.norm_weights_()
 

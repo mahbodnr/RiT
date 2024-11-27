@@ -328,27 +328,9 @@ class Transit(VisionTransformer):
         mlp_layer: Type[nn.Module] = Mlp,
         # DEQ specific args
         n_deq_layers: int = 1,
+        iterations: int = 12,
         z_init_type: str = "zero",
-        f_solver: str = "fixed_point_iter",
-        b_solver: str = "fixed_point_iter",
-        no_stat: Optional[bool] = None,
-        f_max_iter: int = 40,
-        b_max_iter: int = 40,
-        f_tol: float = 1e-3,
-        b_tol: float = 1e-6,
-        f_stop_mode: str = "abs",
-        b_stop_mode: str = "abs",
-        eval_factor: float = 1.0,
-        eval_f_max_iter: int = 0,
-        ift: bool = False,
-        hook_ift: bool = False,
-        grad: int = 1,
-        tau: float = 1.0,
-        sup_gap: int = -1,
-        sup_loc: Optional[int] = None,
-        n_states: int = 1,
-        indexing: Optional[int] = None,
-        norm_type: Optional[str] = "weight_norm",
+        norm_type: str = "weight_norm",
         prefix_filter_out: Optional[Union[str, List[str]]] = None,
         filter_out: Optional[Union[str, List[str]]] = None,
         jac_reg: bool = False,
@@ -357,6 +339,7 @@ class Transit(VisionTransformer):
         stochastic_depth_sigma: float = 0.0,
         stability_reg: bool = False,
         stability_reg_weight: float = 0.1,
+        update_rate: float = 1.0,
         logger=None,
         **kwargs: Any,
     ) -> None:
@@ -459,23 +442,25 @@ class Transit(VisionTransformer):
         assert drop_path_rate == 0, "drop path not supported in Vision Transformer"
         assert init_values is None, "init values not supported in Vision Transformer"
         assert z_init_type in ("zero", "input", "rand", "pre"), "Invalid z_init_type"
+        assert update_rate >= 0 and update_rate <= 1, "Invalid update_rate"
         if z_init_type == "pre":
             self.pre_z = None
+        self.iterations = iterations
         self.logger = logger
         self.z_init_type = z_init_type
         self.jac_reg = jac_reg
         self.jac_loss_weight = jac_loss_weight
-        self.deq_grad_steps = grad
         self.sradius_mode = log_sradius
         self.stochastic_depth_sigma = stochastic_depth_sigma
         self.stability_reg = stability_reg
         self.stability_reg_weight = stability_reg_weight
+        self.update_rate = update_rate
         norm_layer = get_norm_layer(norm_layer) or partial(nn.LayerNorm, eps=1e-6)
         act_layer = get_act_layer(act_layer) or nn.GELU
 
         del self.blocks
         self.deq_layers = nn.ModuleList()
-        for i in range(n_deq_layers):
+        for _ in range(n_deq_layers):
             self.deq_layers.append(
                 nn.Sequential(
                     *[
@@ -498,27 +483,6 @@ class Transit(VisionTransformer):
                 )
             )
         self.injection_transform = nn.Linear(embed_dim, embed_dim)
-        self.deq_kwargs = dict(
-            f_solver=f_solver,
-            b_solver=b_solver,
-            no_stat=no_stat,
-            f_max_iter=f_max_iter,
-            b_max_iter=b_max_iter,
-            f_tol=f_tol,
-            b_tol=b_tol,
-            f_stop_mode=f_stop_mode,
-            b_stop_mode=b_stop_mode,
-            eval_factor=eval_factor,
-            eval_f_max_iter=eval_f_max_iter,
-            ift=ift,
-            hook_ift=hook_ift,
-            grad=grad,
-            tau=tau,
-            sup_gap=sup_gap,
-            sup_loc=sup_loc,
-            n_states=n_states,
-            # indexing=indexing,
-        )
 
         apply_norm(
             self.deq_layers,
@@ -526,21 +490,6 @@ class Transit(VisionTransformer):
             prefix_filter_out=prefix_filter_out,
             filter_out=filter_out,
         )
-
-
-    def deq_forward_writer(self, info, i=0):
-        if self.logger is not None:
-            if info["nstep"].mean() == 0:
-                return
-            for key in ("abs_lowest", "rel_lowest", "nstep"):
-                self.logger(f"Forward/{i}/{key}", info[key].mean())
-            if "sradius" in info and info["sradius"].mean() != -1:
-                self.logger(f"Forward/{i}/sradius", info["sradius"].mean())
-
-    def deq_backward_writer(self, info):
-        if self.logger is not None:
-            for key in ("abs_lowest", "rel_lowest", "nstep"):
-                self.logger(f"Backward/{key}", info[key].mean())
 
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable: bool = True) -> None:
@@ -559,38 +508,30 @@ class Transit(VisionTransformer):
     def _intermediate_layers(
         self,
         x: torch.Tensor,
-        n: Union[int, Sequence] = -1,
+        n: Union[int, Sequence],
         max_iter: Union[int, None] = None,
     ) -> List[torch.Tensor]:
 
-        outputs = []
         # forward pass
         x = self.patch_embed(x)
         x = self._pos_embed(x)
         x = self.patch_drop(x)
         x = self.norm_pre(x)
         # run deq:
+        reset_norm(self.deq_layers)
         u_inj = self.injection(x)
 
         z = self._init_z(x)
-        indexing_deq = get_deq(
-            args=self.deq_kwargs.copy(),
-            # core="indexing",
-            indexing=n,
-            f_solver="simple_fixed_point_iter",
-            b_solver="simple_fixed_point_iter",
-        ).train(self.training)
-        for _, blocks in enumerate(self.deq_layers):
-            solver_kwargs = {"f_max_iter": max_iter} if max_iter is not None else {}
-            z, info = indexing_deq(
-                partial(self.deq_func, blocks=blocks, injection=u_inj),
-                z,
-                solver_kwargs=solver_kwargs,
-            )
-            outputs.append(z)
-
-        return outputs
-
+        outputs = []
+        for blocks in self.deq_layers:
+            steps = max_iter if max_iter is not None else self.iterations
+            block_outputs = []
+            for t in range(steps):
+                z = self.deq_func(z, blocks=blocks, injection=u_inj)
+                if t in n:
+                    block_outputs.append(z)
+            outputs.append(torch.stack(block_outputs))
+        return torch.stack(outputs)
 
     def _init_z(self, x: torch.Tensor) -> torch.Tensor:
         if self.z_init_type == "zero":
@@ -618,32 +559,30 @@ class Transit(VisionTransformer):
         z = self._init_z(x)
         for i, blocks in enumerate(self.deq_layers):
             if self.stochastic_depth_sigma > 0:
-                assert (
-                    self.deq_kwargs["f_max_iter"] == 0
-                ), "Stochastic depth not implemented for f_max_iter > 0"
 
-                stochastic_steps = (
-                    self.deq_kwargs["grad"]
-                    + torch.randn(1, device=x.device)
-                    * self.stochastic_depth_sigma
-                ).clamp(min=1).int().item()
-                deq = get_deq(
-                    {
-                        **self.deq_kwargs,
-                        "grad": stochastic_steps,
-                    }
-                ).train(self.training)
+                steps = (
+                    (
+                        self.iterations
+                        + torch.randn(1, device=x.device) * self.stochastic_depth_sigma
+                    )
+                    .clamp(min=1)
+                    .int()
+                    .item()
+                )
             else:
-                deq = get_deq(self.deq_kwargs).train(self.training)
+                steps = self.iterations
 
-            z, info = deq(
-                partial(self.deq_func, blocks=blocks, injection=u_inj),
-                z,
-                writer=self.deq_backward_writer,
-                sradius_mode=self.sradius_mode,
-            )
-            self.deq_forward_writer(info, i)
-            z = z[-1]
+            for t in range(steps):
+                new_z = self.deq_func(z, blocks=blocks, injection=u_inj)
+                if t == steps - 1:
+                    abs_lowest = (new_z - z).flatten(start_dim=1).norm(dim=1)
+                    rel_lowest = abs_lowest / (
+                        new_z.flatten(start_dim=1).norm(dim=1) + 1e-8
+                    )
+                    self.logger(f"Forward/{i}/abs_lowest", abs_lowest.mean())
+                    self.logger(f"Forward/{i}/rel_lowest", rel_lowest.mean())
+                # z = new_z
+                z = torch.lerp(z, new_z, self.update_rate)
 
         if self.training and self.jac_reg:
             self.jac_loss = (
@@ -658,18 +597,15 @@ class Transit(VisionTransformer):
             self.pre_z = z.clone().detach()
 
         if self.stability_reg:
-            self.stability_loss = F.kl_div(
-                F.log_softmax(z, dim=-1),
-                F.softmax(self.deq_func(z, blocks=blocks, injection=u_inj), dim=-1),
-            ) * self.stability_reg_weight
+            self.stability_loss = (
+                F.kl_div(
+                    F.log_softmax(z, dim=-1),
+                    F.softmax(self.deq_func(z, blocks=blocks, injection=u_inj), dim=-1),
+                )
+                * self.stability_reg_weight
+            )
 
         return z
-
-        # z = self._init_z(x)
-        # for t in range(self.deq.f_max_iter):
-        #     for block in self.blocks:
-        #         z = block(z, injection=u_inj)
-        # return z
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)
@@ -883,25 +819,7 @@ class nTransit(Transit):
         # DEQ specific args
         n_deq_layers: int = 1,
         z_init_type: str = "zero",
-        f_solver: str = "fixed_point_iter",
-        b_solver: str = "fixed_point_iter",
-        no_stat: Optional[bool] = None,
-        f_max_iter: int = 40,
-        b_max_iter: int = 40,
-        f_tol: float = 1e-3,
-        b_tol: float = 1e-6,
-        f_stop_mode: str = "abs",
-        b_stop_mode: str = "abs",
-        eval_factor: float = 1.0,
-        eval_f_max_iter: int = 0,
-        ift: bool = False,
-        hook_ift: bool = False,
-        grad: int = 1,
-        tau: float = 1.0,
-        sup_gap: int = -1,
-        sup_loc: Optional[int] = None,
-        n_states: int = 1,
-        indexing: Optional[int] = None,
+        iterations: int = 12,
         norm_type: Optional[str] = "weight_norm",
         prefix_filter_out: Optional[Union[str, List[str]]] = None,
         filter_out: Optional[Union[str, List[str]]] = None,
@@ -946,25 +864,7 @@ class nTransit(Transit):
             mlp_layer=mlp_layer,
             n_deq_layers=n_deq_layers,
             z_init_type=z_init_type,
-            f_solver=f_solver,
-            b_solver=b_solver,
-            no_stat=no_stat,
-            f_max_iter=f_max_iter,
-            b_max_iter=b_max_iter,
-            f_tol=f_tol,
-            b_tol=b_tol,
-            f_stop_mode=f_stop_mode,
-            b_stop_mode=b_stop_mode,
-            eval_factor=eval_factor,
-            eval_f_max_iter=eval_f_max_iter,
-            ift=ift,
-            hook_ift=hook_ift,
-            grad=grad,
-            tau=tau,
-            sup_gap=sup_gap,
-            sup_loc=sup_loc,
-            n_states=n_states,
-            indexing=indexing,
+            iterations=iterations,
             norm_type=norm_type,
             prefix_filter_out=prefix_filter_out,
             filter_out=filter_out,
@@ -982,8 +882,7 @@ class nTransit(Transit):
                             num_heads=num_heads,
                             mlp_ratio=mlp_ratio,
                             dropout=drop_rate,
-                            residual_lerp_scale_init=1
-                            / (self.deq_kwargs["f_max_iter"] + self.deq_grad_steps),
+                            residual_lerp_scale_init=1 / self.iterations,
                         )
                         for _ in range(depth)
                     ]
@@ -1024,152 +923,153 @@ _blocks = {
 }
 
 
-# @register_model
-# def transit_tiny_patch16_224(
-#     num_classes: int = 1000,
-#     pretrained: bool = False,
-#     **kwargs: Any,
-# ) -> Transit:
-#     assert not pretrained, "Pretrained model not available for this configuration"
-#     return Transit(
-#         img_size=224,
-#         patch_size=16,
-#         embed_dim=192,
-#         num_heads=3,
-#         mlp_ratio=4.0,
-#         num_classes=num_classes,
-#         block_fn=_blocks[kwargs["block_type"]],
-#         **kwargs,
-#     )
+@register_model
+def transit_tiny_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> Transit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return Transit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=192,
+        num_heads=3,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
 
 
-# @register_model
-# def transit_small_patch16_224(
-#     num_classes: int = 1000,
-#     pretrained: bool = False,
-#     **kwargs: Any,
-# ) -> Transit:
-#     assert not pretrained, "Pretrained model not available for this configuration"
-#     return Transit(
-#         img_size=224,
-#         patch_size=16,
-#         embed_dim=384,
-#         num_heads=6,
-#         mlp_ratio=4.0,
-#         num_classes=num_classes,
-#         block_fn=_blocks[kwargs["block_type"]],
-#         **kwargs,
-#     )
+@register_model
+def transit_small_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> Transit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return Transit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=384,
+        num_heads=6,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
 
 
-# @register_model
-# def transit_base_patch16_224(
-#     num_classes: int = 1000,
-#     pretrained: bool = False,
-#     **kwargs: Any,
-# ) -> Transit:
-#     assert not pretrained, "Pretrained model not available for this configuration"
-#     return Transit(
-#         img_size=224,
-#         patch_size=16,
-#         embed_dim=768,
-#         num_heads=12,
-#         mlp_ratio=4.0,
-#         num_classes=num_classes,
-#         block_fn=_blocks[kwargs["block_type"]],
-#         **kwargs,
-#     )
+@register_model
+def transit_base_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> Transit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return Transit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=768,
+        num_heads=12,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
 
 
-# @register_model
-# def transit_large_patch16_224(
-#     num_classes: int = 1000,
-#     pretrained: bool = False,
-#     **kwargs: Any,
-# ) -> Transit:
-#     assert not pretrained, "Pretrained model not available for this configuration"
-#     return Transit(
-#         img_size=224,
-#         patch_size=16,
-#         embed_dim=1024,
-#         num_heads=16,
-#         mlp_ratio=4.0,
-#         num_classes=num_classes,
-#         block_fn=_blocks[kwargs["block_type"]],
-#         **kwargs,
-#     )
+@register_model
+def transit_large_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> Transit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return Transit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=1024,
+        num_heads=16,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
 
 
-# @register_model
-# def transit_moe_tiny_patch16_224(
-#     num_classes: int = 1000,
-#     pretrained: bool = False,
-#     **kwargs: Any,
-# ) -> TransitMoE:
-#     assert not pretrained, "Pretrained model not available for this configuration"
-#     return TransitMoE(
-#         img_size=224,
-#         patch_size=16,
-#         embed_dim=192,
-#         num_heads=3,
-#         mlp_ratio=4.0,
-#         num_classes=num_classes,
-#         block_fn=_blocks[kwargs["block_type"]],
-#         **kwargs,
-#     )
+@register_model
+def transit_moe_tiny_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> TransitMoE:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return TransitMoE(
+        img_size=224,
+        patch_size=16,
+        embed_dim=192,
+        num_heads=3,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
 
 
-# @register_model
-# def ntransit_tiny_patch16_224(
-#     num_classes: int = 1000,
-#     pretrained: bool = False,
-#     **kwargs: Any,
-# ) -> nTransit:
-#     assert not pretrained, "Pretrained model not available for this configuration"
-#     return nTransit(
-#         img_size=224,
-#         patch_size=16,
-#         embed_dim=192,
-#         num_heads=3,
-#         mlp_ratio=4.0,
-#         num_classes=num_classes,
-#         block_fn=_blocks[kwargs["block_type"]],
-#         **kwargs,
-#     )
+@register_model
+def ntransit_tiny_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> nTransit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return nTransit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=192,
+        num_heads=3,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
 
 
-# @register_model
-# def ntransit_small_patch16_224(
-#     num_classes: int = 1000,
-#     pretrained: bool = False,
-#     **kwargs: Any,
-# ) -> nTransit:
-#     assert not pretrained, "Pretrained model not available for this configuration"
-#     return nTransit(
-#         img_size=224,
-#         patch_size=16,
-#         embed_dim=384,
-#         num_heads=6,
-#         mlp_ratio=4.0,
-#         num_classes=num_classes,
-#         block_fn=_blocks[kwargs["block_type"]],
-#         **kwargs,
-#     )
+@register_model
+def ntransit_small_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> nTransit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return nTransit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=384,
+        num_heads=6,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
 
-# @register_model
-# def ntransit_base_patch16_224(
-#     num_classes: int = 1000,
-#     pretrained: bool = False,
-#     **kwargs: Any,
-# ) -> nTransit:
-#     assert not pretrained, "Pretrained model not available for this configuration"
-#     return nTransit(
-#         img_size=224,
-#         patch_size=16,
-#         embed_dim=768,
-#         num_heads=12,
-#         mlp_ratio=4.0,
-#         num_classes=num_classes,
-#         block_fn=_blocks[kwargs["block_type"]],
-#         **kwargs,
-#     )
+
+@register_model
+def ntransit_base_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> nTransit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return nTransit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=768,
+        num_heads=12,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )

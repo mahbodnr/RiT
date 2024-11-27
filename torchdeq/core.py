@@ -324,7 +324,6 @@ class DEQIndexing(DEQBase):
                 - dict[str, torch.Tensor]: A dict containing solver statistics.
         """
         solver_kwargs = {k:v for k, v in solver_kwargs.items() if k != 'f_max_iter'}
-        indexing = indexing if self.training else None
 
         with torch.no_grad():
             z_star, trajectory, info = self.f_solver(
@@ -377,15 +376,15 @@ class DEQIndexing(DEQBase):
         if solver_kwargs is None:
             solver_kwargs = dict()
 
-        if self.training:
-            if type(solver_kwargs.get('f_max_iter', None)) in [int, float]:
-                indexing = self._compute_f_iter(solver_kwargs['f_max_iter'])
-            else:
-                indexing = self.indexing
+        if type(solver_kwargs.get('f_max_iter', None)) in [int, float]:
+            indexing = self._compute_f_iter(solver_kwargs['f_max_iter'])
+        else:
+            indexing = self.indexing
 
-            _, trajectory, info = self._solve_fixed_point(deq_func, z_init, 
-                    f_max_iter=solver_kwargs.get('f_max_iter', self.f_max_iter), indexing=indexing, solver_kwargs=solver_kwargs)
-            
+        z_star, trajectory, info = self._solve_fixed_point(deq_func, z_init, 
+                f_max_iter=solver_kwargs.get('f_max_iter', self.f_max_iter), indexing=indexing, solver_kwargs=solver_kwargs)
+        
+        if self.training:
             z_out = []
             for z_pred, produce_grad in zip(trajectory, self.produce_grad):
                 z_pred = deq_func.detach(z_pred)
@@ -393,14 +392,9 @@ class DEQIndexing(DEQBase):
             
             z_out = [deq_func.vec2list(each) for each in z_out]
         else:
-            # During inference, we directly solve for the fixed point
-            z_star, _, info = self._solve_fixed_point(deq_func, z_init, 
-                    f_max_iter=solver_kwargs.get('f_max_iter', self.eval_f_max_iter), solver_kwargs=solver_kwargs)
-            
             sradius = self._sradius(deq_func, z_star) if sradius_mode else torch.zeros(1, device=z_star.device)
             info['sradius'] = sradius
-
-            z_out = [deq_func.vec2list(z_star)]
+            z_out = torch.stack(trajectory)
 
         return z_out, info
 
@@ -600,12 +594,15 @@ class DEQSliced(DEQBase):
             else:
                 indexing = self.indexing
 
+            print("indexing", indexing)
+            print("pg", len(self.produce_grad))
             z_out = []
             for f_max_iter, produce_grad in zip(indexing, self.produce_grad):
                 z_star, info = self._solve_fixed_point(deq_func, z_star, f_max_iter=f_max_iter, solver_kwargs=solver_kwargs)
                 z_star = deq_func.detach(z_star)
                 z_out += produce_grad(self, deq_func, z_star, writer=backward_writer)   # See torchdeq.grad for implementations
                 z_star = z_out[-1]                                                      # Add the gradient chain to the solver.
+                print("*", f_max_iter, produce_grad, len(z_out), z_star.shape)
 
             z_out = [deq_func.vec2list(each) for each in z_out]
         else:

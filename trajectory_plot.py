@@ -13,11 +13,24 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 models = {
-    "Transit": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_mvqsm_20241114141001.ckpt",
-    "NormalizedTransit": r"model_checkpoints/ntransit_tiny_patch16_224_tiny-imagenet_bucfd_20241115155006.ckpt", 
-    "Transit+StochasticDepth": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_tqflk_20241115142246.ckpt",
-    "Transit+StabilityRegularization": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_ttlwl_20241115174836.ckpt",
-    # "Transit+StabilityRegularization+StochasticDepth": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_hsxyj_20241116041536.ckpt",
+    # # "Transit": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_mvqsm_20241114141001.ckpt", #old
+    # "Transit": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_alrbj_20241125222020.ckpt",
+    # # "NormalizedTransit": r"model_checkpoints/ntransit_tiny_patch16_224_tiny-imagenet_bucfd_20241115155006.ckpt", 
+    # "Transit+StochasticDepth": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_tqflk_20241115142246.ckpt",
+    # # "Transit+StabilityRegularization": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_ttlwl_20241115174836.ckpt",
+    # # "Transit+StabilityRegularization+StochasticDepth": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_hsxyj_20241116041536.ckpt",
+    # # "Transit+trajectoryLoss 5": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_bwpwr_20241124170338.ckpt", #old
+    # "Transit+trajectoryLoss 5": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_hlkld_20241125223537.ckpt",
+
+    # prenorm 
+    "Transit": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_dqedp_20241126231131.ckpt",
+    # add:
+    # "+ Trajectory Loss 5":  r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_yhwwt_20241127003105.ckpt",
+    # "+ Trajectory Loss 12":  r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_bhykv_20241127082118.ckpt",
+    # prenorm
+    "+ Trajectory Loss 5":  r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_dlisq_20241126223321.ckpt",
+    "+ Trajectory Loss 12":  r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_ywwit_20241127010731.ckpt",
+    # "+ Trajectory Loss 5 (17 iters)":  r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_dywhi_20241126230447.ckpt",
 }
 
 fig = plt.figure(figsize=(12, 14))
@@ -45,36 +58,40 @@ for i, (model_name, model_path) in enumerate(models.items()):
     net = Net(args).to(device)
     net.load_state_dict(
         state["state_dict"],
-        strict=False,
+        strict=True,
     )
-    net.eval()
-
-    if "indexing" in state["hyper_parameters"]:
-        del state["hyper_parameters"]["indexing"]
-
     net = net.to(device)
+    net.eval()
     steps = 50
+    loss = torch.zeros(steps, device=device)
+    accuracy = torch.zeros(steps, device=device)
     with torch.no_grad():
-        output = net.model._intermediate_layers(
-            data,
-            n=list(range(1, steps+1)),
-            max_iter = steps,
-        )
-    outputs = torch.stack(output[0]) # [steps, batch, tokens, dim]
-    preds = []
-    for out in outputs:
-        pred = net.model.forward_head(net.model.norm(out))
-        preds.append(pred)
-    preds = torch.stack(preds).detach()
+        for data, label in test_dl:
+            data, label = data.to(device), label.to(device)
+            outputs = net.model._intermediate_layers(
+                data,
+                n=list(range(steps)),
+                max_iter = steps,
+            )[0] # [steps, batch, tokens, dim]
 
+            preds = []
+            for out in outputs:
+                pred = net.model.forward_head(net.model.norm(out))
+                preds.append(pred)
+            preds = torch.stack(preds).detach()
 
-    loss = []
-    accuracy = []
-    mse = []
-    with torch.no_grad():
-        for pred in preds:
-            loss.append(F.cross_entropy(pred, label).cpu())
-            accuracy.append((pred.argmax(-1) == label).float().mean().cpu())
+            batch_loss = []
+            batch_accuracy = []
+            for pred in preds:
+                batch_loss.append(F.cross_entropy(pred, label).cpu())
+                batch_accuracy.append((pred.argmax(-1) == label).float().mean().cpu())
+            loss += torch.stack(batch_loss).to(device)
+            accuracy += torch.stack(batch_accuracy).to(device)
+    loss /= len(test_dl)
+    accuracy /= len(test_dl)
+
+    loss = loss.cpu().numpy()
+    accuracy = accuracy.cpu().numpy()
 
     plt.subplot(3, 1, 1)
     x_axis = torch.arange(1, len(loss) + 1)
@@ -96,6 +113,8 @@ for i, (model_name, model_path) in enumerate(models.items()):
     conv = lambda x: np.linalg.norm((x[1:] - x[:-1]).reshape((x.shape[0]-1, -1)), axis=1)
     plt.subplot(3, 1, 3)
     plt.plot(torch.arange(1, len(outputs)), conv(outputs.cpu()), label=model_name)
+    if i == 0:
+        plt.axvline(x=12, color="red", linestyle="--", alpha=0.5)
     plt.title(r"Block outputs convergence")
     plt.xlabel("Iterations")
     plt.ylabel(r"$(x_{i+1} - x_{i})^2$")

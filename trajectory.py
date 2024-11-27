@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from torchdeq import get_deq
+import pytorch_lightning as pl
 
 
 sns.set_style("dark")
@@ -32,8 +33,10 @@ model_path = (
     # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_misoc_20241112194558.ckpt"
     # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_edttv_20241114174424.ckpt"
     # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_lypvp_20241115142250.ckpt" # pre-sd
-    r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_tqflk_20241115142246.ckpt" #zero-sd
+    # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_tqflk_20241115142246.ckpt" #zero-sd
     # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_iioew_20241116060215.ckpt"
+    # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_bwpwr_20241124170338.ckpt"
+    r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_layyv_20241126172905.ckpt"
 )
 
 state = torch.load(model_path)
@@ -47,11 +50,12 @@ elif args.default_dtype == "float32":
     torch.set_float32_matmul_precision(args.matmul_precision)
 #%%
 # Load the data
-args.eval_batch_size = 256
-train_dl, test_dl = get_dataloader(args)
-data, label = next(iter(test_dl))
-data, label = data.to(device), label.to(device)
+# args.eval_batch_size = 128
+# train_dl, test_dl = get_dataloader(args)
+# data, label = next(iter(test_dl))
+# data, label = data.to(device), label.to(device)
 
+data, label = torch.randn(25, 3, 224, 224).to(device), torch.randint(0, 1000, (25,)).to(device)
 #%%
 # Load the model
 net = Net(args).to(device)
@@ -62,14 +66,8 @@ net.load_state_dict(
 net.eval()
 
 # %%
-if "indexing" in state["hyper_parameters"]:
-    del state["hyper_parameters"]["indexing"]
-# %%
-# import pytorch_lightning as pl
-# state["hyper_parameters"]["eval_f_max_iter"] = 12
-# net.model.deq = get_deq(**state["hyper_parameters"])
-# torch.set_float32_matmul_precision('medium')
-# trainer = pl.Trainer(accelerator="auto")
+# net.model.deq_kwargs["eval_f_max_iter"] = 12
+# trainer = pl.Trainer(accelerator="gpu")
 # with torch.no_grad():
 #     trainer.test(net, test_dl)
 
@@ -77,44 +75,23 @@ if "indexing" in state["hyper_parameters"]:
 # data, label = data.to("cpu"), label.to("cpu")
 # net.to("cpu")
 # %%
-
-# steps = args.grad
-net = net.to(device)
+# net = net.to(device)
+net.train()
 steps = 50
 with torch.no_grad():
-    output = net.model._intermediate_layers(
+    outputs = net.model._intermediate_layers(
         data,
-        n=list(range(1, steps+1)),
+        n=list(range(steps)),
         max_iter = steps,
-    )
-outputs = torch.stack(output[0]) # [steps, batch, tokens, dim]
+    )[0]
+outputs = torch.stack(outputs).detach()
 print(outputs.shape)
 preds = []
 for out in outputs:
     pred = net.model.forward_head(net.model.norm(out))
     preds.append(pred)
-preds = torch.stack(preds).detach()
+preds = torch.stack(preds).detach().clone()
 print(preds.shape)
-
-# %% convergence
-conv = lambda x: np.linalg.norm((x[1:] - x[:-1]).reshape((x.shape[0]-1, -1)), axis=1)
-
-plt.figure(figsize=(8, 10))
-plt.subplot(2, 1, 1)
-plt.plot(torch.arange(1, len(outputs)), conv(outputs.cpu()))
-plt.title(r"Block outputs convergence")
-plt.xlabel("Iterations")
-plt.ylabel(r"$(x_{i+1} - x_{i})^2$")
-# plt.yscale("log")
-plt.subplot(2, 1, 2)
-plt.plot(torch.arange(1, len(preds)), conv(preds.cpu()))
-plt.title(r"Predictions convergence")
-plt.xlabel("Iterations")
-plt.ylabel(r"$(x_{i+1} - x_{i})^2$")
-# plt.yscale("log")
-plt.show()
-
-
 # %% Performance:
 loss = []
 accuracy = []
@@ -138,6 +115,26 @@ plt.axvline(x=12, color="red", linestyle="--", alpha=0.5)
 plt.xlabel("Iterations")
 plt.ylabel("Accuracy")
 plt.show()
+
+# convergence
+conv = lambda x: np.linalg.norm((x[1:] - x[:-1]).reshape((x.shape[0]-1, -1)), axis=1)
+
+plt.figure(figsize=(8, 10))
+plt.subplot(2, 1, 1)
+plt.plot(torch.arange(1, len(outputs)), conv(outputs.cpu()))
+plt.title(r"Block outputs convergence")
+plt.xlabel("Iterations")
+plt.ylabel(r"$(x_{i+1} - x_{i})^2$")
+# plt.yscale("log")
+plt.subplot(2, 1, 2)
+plt.plot(torch.arange(1, len(preds)), conv(preds.cpu()))
+plt.title(r"Predictions convergence")
+plt.xlabel("Iterations")
+plt.ylabel(r"$(x_{i+1} - x_{i})^2$")
+# plt.yscale("log")
+plt.show()
+
+
 # %%
 # make a gif showing the change of the output distributions over time
 import matplotlib.animation as animation
