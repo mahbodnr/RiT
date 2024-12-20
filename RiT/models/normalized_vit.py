@@ -162,9 +162,6 @@ class nViTBlock(Module):
         self.scale = embed_dim ** 0.5
         mlp_dim = int(embed_dim * mlp_ratio)
 
-        self.layers = ModuleList([])
-        self.residual_lerp_scales = nn.ParameterList([])
-
         self.attn = Attention(embed_dim, dim_head = dim_head, heads = num_heads, dropout = dropout)
         self.ff = FeedForward(embed_dim, dim_inner = mlp_dim, dropout = dropout)
 
@@ -195,11 +192,7 @@ class nViTBlock2(Module):
         super().__init__()
 
         self.dim = embed_dim
-        self.scale = embed_dim ** 0.5
         mlp_dim = int(embed_dim * mlp_ratio)
-
-        self.layers = ModuleList([])
-        self.residual_lerp_scales = nn.ParameterList([])
 
         self.attn = Attention(embed_dim, dim_head = dim_head, heads = num_heads, dropout = dropout)
         self.ff = FeedForward(embed_dim, dim_inner = mlp_dim, dropout = dropout)
@@ -207,21 +200,102 @@ class nViTBlock2(Module):
         self.attn_alpha = nn.Linear(embed_dim, embed_dim)
         self.ff_alpha = nn.Linear(embed_dim, embed_dim)
 
-        self.gelu = nn.GELU()
+        self.activation = nn.ReLU()
 
 
     def forward(self, x):
-        attn_alpha = self.gelu(self.attn_alpha(x)).mean(dim = -2, keepdim = True)
+        attn_alpha = self.activation(self.attn_alpha(x)).mean(dim = -2, keepdim = True)
         attn_out = l2norm(self.attn(x))
-        x = l2norm(x.lerp(attn_out, attn_alpha * self.scale))
+        x = l2norm(x.lerp(attn_out, attn_alpha))
 
-        ff_alpha = self.gelu(self.ff_alpha(x)).mean(dim = -2, keepdim = True)
+        ff_alpha = self.activation(self.ff_alpha(x)).mean(dim = -2, keepdim = True)
         ff_out = l2norm(self.ff(x))
-        x = l2norm(x.lerp(ff_out, ff_alpha * self.scale))
+        x = l2norm(x.lerp(ff_out, ff_alpha))
 
         return x
 
+class nViTBlock2(Module):
+    def __init__(
+        self,
+        embed_dim,
+        dim_head,
+        num_heads,
+        mlp_ratio = 4,
+        dropout = 0.,
+        residual_lerp_scale_init = 1, # 1 / depth
+    ):
+        super().__init__()
 
+        self.dim = embed_dim
+        mlp_dim = int(embed_dim * mlp_ratio)
+
+        self.attn = Attention(embed_dim, dim_head = dim_head, heads = num_heads, dropout = dropout)
+        self.ff = FeedForward(embed_dim, dim_inner = mlp_dim, dropout = dropout)
+
+        self.attn_alpha = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim * 2, embed_dim)
+        )
+        self.ff_alpha = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim * 2, embed_dim)
+        )
+
+
+    def forward(self, x):
+        attn_alpha = self.attn_alpha(x).mean(dim = -2, keepdim = True)
+        attn_out = l2norm(self.attn(x))
+        x = l2norm(x.lerp(attn_out, attn_alpha))
+
+        ff_alpha = self.ff_alpha(x).mean(dim = -2, keepdim = True)
+        ff_out = l2norm(self.ff(x))
+        x = l2norm(x.lerp(ff_out, ff_alpha))
+
+        return x
+
+# class nViTBlock2(Module):
+#     def __init__(
+#         self,
+#         embed_dim,
+#         dim_head,
+#         num_heads,
+#         mlp_ratio = 4,
+#         dropout = 0.,
+#         residual_lerp_scale_init = 1, # 1 / depth
+#     ):
+#         super().__init__()
+
+#         self.dim = embed_dim
+#         mlp_dim = int(embed_dim * mlp_ratio)
+
+#         self.attn = Attention(embed_dim, dim_head = dim_head, heads = num_heads, dropout = dropout)
+#         self.ff = FeedForward(embed_dim, dim_inner = mlp_dim, dropout = dropout)
+
+#         self.attn_alpha = nn.Sequential(
+#             nn.Linear(embed_dim, embed_dim * 2),
+#             nn.ReLU(),
+#             nn.Linear(embed_dim * 2, embed_dim)
+#         )
+#         self.ff_alpha = nn.Sequential(
+#             nn.Linear(embed_dim, embed_dim * 2),
+#             nn.ReLU(),
+#             nn.Linear(embed_dim * 2, embed_dim)
+#         )
+
+
+#     def forward(self, x):
+#         attn_alpha = self.attn_alpha(x[:,0:1])
+#         attn_out = l2norm(self.attn(x))
+#         x = l2norm(x.lerp(attn_out, attn_alpha))
+
+#         ff_alpha = self.ff_alpha(x[:,0:1])
+#         ff_out = l2norm(self.ff(x))
+#         x = l2norm(x.lerp(ff_out, ff_alpha))
+
+#         return x
+    
 # classes
 
 class nViT(Module):

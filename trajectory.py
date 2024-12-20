@@ -26,17 +26,7 @@ parser.add_argument(
 
 # transait
 model_path = (
-    # r"model_checkpoints/transit_tiny_patch16_224_imagenet_vdeyf_20241017131041.ckpt"
-    # r"model_checkpoints/ntransit_tiny_patch16_224_imagenet_ehzxr_20241025181909.ckpt"
-    # r"model_checkpoints/ntransit_small_patch16_224_imagenet_gnbod_20241028104816.ckpt"
-    # r"model_checkpoints/ntransit_tiny_patch16_224_tiny-imagenet_ilibt_20241111153746.ckpt"
-    # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_misoc_20241112194558.ckpt"
-    # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_edttv_20241114174424.ckpt"
-    # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_lypvp_20241115142250.ckpt" # pre-sd
-    # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_tqflk_20241115142246.ckpt" #zero-sd
-    # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_iioew_20241116060215.ckpt"
-    # r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_bwpwr_20241124170338.ckpt"
-    r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_layyv_20241126172905.ckpt"
+    r"model_checkpoints/rtransit_tiny_patch16_224_tiny-imagenet_zfzum_20241218143507.ckpt"
 )
 
 state = torch.load(model_path)
@@ -48,15 +38,17 @@ if args.default_dtype == "float64":
 elif args.default_dtype == "float32":
     torch.set_default_dtype(torch.float32)
     torch.set_float32_matmul_precision(args.matmul_precision)
-#%%
+# %%
 # Load the data
-# args.eval_batch_size = 128
-# train_dl, test_dl = get_dataloader(args)
-# data, label = next(iter(test_dl))
-# data, label = data.to(device), label.to(device)
+args.eval_batch_size = 64
+train_dl, test_dl = get_dataloader(args)
+data, label = next(iter(test_dl))
+data, label = data.to(device), label.to(device)
 
-data, label = torch.randn(25, 3, 224, 224).to(device), torch.randint(0, 1000, (25,)).to(device)
-#%%
+# data, label = torch.randn(25, 3, 224, 224).to(device), torch.randint(0, 1000, (25,)).to(
+#     device
+# )
+# %%
 # Load the model
 net = Net(args).to(device)
 net.load_state_dict(
@@ -75,16 +67,15 @@ net.eval()
 # data, label = data.to("cpu"), label.to("cpu")
 # net.to("cpu")
 # %%
-# net = net.to(device)
+net = net.to(device)
 net.train()
 steps = 50
 with torch.no_grad():
     outputs = net.model._intermediate_layers(
         data,
         n=list(range(steps)),
-        max_iter = steps,
-    )[0]
-outputs = torch.stack(outputs).detach()
+        max_iter=steps,
+    )[0].detach()
 print(outputs.shape)
 preds = []
 for out in outputs:
@@ -94,11 +85,14 @@ preds = torch.stack(preds).detach().clone()
 print(preds.shape)
 # %% Performance:
 loss = []
+loss_batch = []
 accuracy = []
 mse = []
 with torch.no_grad():
     for pred in preds:
-        loss.append(F.cross_entropy(pred, label).cpu())
+        l = F.cross_entropy(pred, label, reduction="none").cpu()
+        loss.append(l.mean())
+        loss_batch.append(l)
         accuracy.append((pred.argmax(-1) == label).float().mean().cpu())
 
 x_axis = torch.arange(1, len(loss) + 1)
@@ -117,24 +111,80 @@ plt.ylabel("Accuracy")
 plt.show()
 
 # convergence
-conv = lambda x: np.linalg.norm((x[1:] - x[:-1]).reshape((x.shape[0]-1, -1)), axis=1)
+conv = lambda x: np.linalg.norm((x[1:] - x[:-1]).reshape((x.shape[0] - 1, -1)), axis=1)
 
 plt.figure(figsize=(8, 10))
-plt.subplot(2, 1, 1)
+plt.subplot(3, 1, 1)
 plt.plot(torch.arange(1, len(outputs)), conv(outputs.cpu()))
 plt.title(r"Block outputs convergence")
 plt.xlabel("Iterations")
 plt.ylabel(r"$(x_{i+1} - x_{i})^2$")
-# plt.yscale("log")
-plt.subplot(2, 1, 2)
+plt.yscale("log")
+plt.subplot(3, 1, 2)
 plt.plot(torch.arange(1, len(preds)), conv(preds.cpu()))
 plt.title(r"Predictions convergence")
 plt.xlabel("Iterations")
 plt.ylabel(r"$(x_{i+1} - x_{i})^2$")
-# plt.yscale("log")
+plt.yscale("log")
+
 plt.show()
 
+# %%
+conv_batch = lambda x: np.linalg.norm((x[1:] - x[:-1]).reshape((x.shape[0] - 1, x.shape[1], -1)), axis=-1)
 
+plt.figure(figsize=(8, 14))
+plt.subplot(3, 1, 1)
+plt.plot(torch.arange(1, len(outputs)), conv_batch(outputs.cpu()), alpha=0.5)
+plt.title(r"Block outputs convergence")
+plt.xlabel("Iterations")
+plt.ylabel(r"$(x_{i+1} - x_{i})^2$")
+plt.subplot(3, 1, 2)
+plt.plot(torch.arange(1, len(preds)), conv_batch(preds.cpu()), alpha=0.5)
+plt.title(r"Predictions convergence")
+plt.xlabel("Iterations")
+plt.ylabel(r"$(x_{i+1} - x_{i})^2$")
+
+plt.subplot(3, 1, 3)
+plt.plot(torch.arange(len(loss_batch)), torch.stack(loss_batch)[:, :10].cpu(),"--", alpha=0.5)
+plt.title(r"Loss")
+plt.xlabel("Iterations")
+plt.ylabel(r"Loss")
+plt.yscale("log")
+
+plt.show()
+# %%
+plt.subplots(4, 1, figsize=(8, 16))
+plt.subplot(4, 1, 1)
+plt.title("Q scale")
+plt.hist(net.model.deq_layers[0][0].attn.q_scale.flatten().detach().cpu(), bins=25)
+plt.subplot(4, 1, 2)
+plt.title("K scale")
+plt.hist(net.model.deq_layers[0][0].attn.k_scale.flatten().detach().cpu(), bins=25)
+plt.subplot(4, 1, 3)
+plt.title("hidden scale")
+plt.hist(net.model.deq_layers[0][0].ff.hidden_scale.flatten().detach().cpu(), bins=25)
+plt.subplot(4, 1, 4)
+plt.title("gate scale")
+plt.hist(net.model.deq_layers[0][0].ff.gate_scale.flatten().detach().cpu(), bins=25)
+# %%
+for scale in ["q_scale", "k_scale"]:
+    mean= []
+    std = []
+    for block in net.model.blocks:
+        mean.append(getattr(block.attn, scale).mean().item())
+        std.append(getattr(block.attn, scale).std().item())
+    plt.errorbar(range(len(mean)), mean, yerr=std, fmt="-o", label=scale)
+plt.legend()
+# %%
+for scale in ["ff_alpha", "attn_alpha"]:
+    mean= []
+    std = []
+    for block in net.model.blocks:
+        mean.append((getattr(block, scale) * block.scale).mean().item())
+        std.append((getattr(block, scale)* block.scale).std().item())
+    plt.plot(range(len(mean)), mean, "-o", label=scale)
+    # plt.errorbar(range(len(mean)), mean, yerr=std, fmt="-o", label=scale)
+plt.legend()
 # %%
 # make a gif showing the change of the output distributions over time
 import matplotlib.animation as animation
@@ -144,6 +194,7 @@ from matplotlib.animation import PillowWriter
 # selected_output = outputs.mean(1)
 
 fig, ax = plt.subplots()
+
 
 def update(i):
     ax.clear()
@@ -161,9 +212,7 @@ def update(i):
     return ax
 
 
-ani = animation.FuncAnimation(
-    fig, update, frames=range(outputs.shape[0]), repeat=False
-)
+ani = animation.FuncAnimation(fig, update, frames=range(outputs.shape[0]), repeat=False)
 # save
 writer = PillowWriter(fps=5)
 ani.save("output_distributions.gif", writer=writer)
@@ -175,18 +224,20 @@ import matplotlib.animation as animation
 from matplotlib.animation import PillowWriter
 
 fig, ax = plt.subplots()
+selected_output = outputs.view(outputs.shape[0], -1)
 
 preds = net.model.forward_head(net.model.norm(outputs)).detach().cpu()
+
 
 def update(i):
     ax.clear()
     iteration_output = outputs[i]
-    iteration_preds =  net.model.forward_head(net.model.norm(iteration_output)).detach().cpu()
+    iteration_preds = (
+        net.model.forward_head(net.model.norm(iteration_output)).detach().cpu()
+    )
     res = torch.zeros(iteration_preds.shape[-1])
     for p in iteration_preds:
-        sorted_output, indicies = torch.sort(
-            F.softmax(p), descending=False
-        )
+        sorted_output, indicies = torch.sort(F.softmax(p), descending=False)
         res += sorted_output
     res /= preds.shape[1]
     ax.plot(np.arange(len(res)), np.log(res.cpu().numpy()), alpha=0.5)
@@ -209,6 +260,7 @@ plt.show()
 # %%
 import umap
 from tqdm import tqdm
+
 token = "all"
 dots = []
 with torch.no_grad():
@@ -239,6 +291,7 @@ for i in range(16):
     )
     ax.scatter(tr[N, 0], tr[N, 1], tr[N, 2], c="red", s=150)
     ax.scatter(tr[0, 0], tr[0, 1], tr[0, 2], c="black", s=150, label="start")
+plt.legend()
 ax.set_title(f"Trajectory")
 plt.show()
 
@@ -262,7 +315,9 @@ plt.plot(torch.stack(mse), alpha=0.5)
 plt.show()
 
 # %% histogram:
-plt.hist(abs(o[-1] - o[-2]).mean(0), bins = 100, range=(0, 0.2))
+plt.hist(abs(o[-1] - o[-2]).mean(0), bins=100, range=(0, 0.2))
+
+
 # %% dimnsion
 def first_derivative_torch(x, y):
     dx = torch.diff(x)

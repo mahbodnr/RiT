@@ -66,6 +66,7 @@ class nViT(VisionTransformer):
         block_fn: Type[nn.Module] = Block,
         mlp_layer: Type[nn.Module] = Mlp,
         # nViT args
+        **kwargs: Any,
     ):
         super().__init__(
             img_size=img_size,

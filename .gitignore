@@ -1,6 +1,7 @@
 model_checkpoints
 logs
 wandb
+media/
 *.bash
 tests/
 tmp*

@@ -12,10 +12,9 @@ from RiT.models import *
 from RiT.utils import get_criterion, get_layer_outputs
 from RiT.augmentation import CutMix, MixUp
 
-from RiT.models.repeat_transformer import RiTHalt, SimpleRiT2
+from schedulefree import ScheduleFreeWrapperReference
 import matplotlib.pyplot as plt
 from pytorch_lightning.utilities.exceptions import MisconfigurationException
-
 
 
 class Net(pl.LightningModule):
@@ -33,6 +32,7 @@ class Net(pl.LightningModule):
         kwargs = {
             k: self.hparams[k]
             for k in [
+                "depth",
                 "in_chans",
                 "num_classes",
                 "global_pool",
@@ -76,6 +76,12 @@ class Net(pl.LightningModule):
                         "stability_reg",
                         "stability_reg_weight",
                         "update_rate",
+                        "injection",
+                        "inject_input",  # old version
+                        "use_head_vit",
+                        "phantom_grad",
+                        "phantom_grad_steps",
+                        "phantom_grad_update_rate",
                     ]
                 }
             )
@@ -139,7 +145,8 @@ class Net(pl.LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def calculate_loss(self, out, label, img, **kwargs):
+    def calculate_loss(self, out, label, img, reduction="mean", **kwargs):
+        self.criterion.reduction = reduction
         loss = self.criterion(out, label)
         if kwargs.get("aux_loss", 0) != 0:
             loss += kwargs["aux_loss"]
@@ -184,7 +191,15 @@ class Net(pl.LightningModule):
             self, param_group_fn=param_group_fn, **optimizer_kwargs(cfg=self.hparams)
         )
 
-        self.scheduler, self.hparams.num_epochs = create_scheduler(self.hparams, self.optimizer)
+        if self.hparams.schedule_free:
+            assert self.hparams.sched in [
+                "none",
+                None,
+            ], "Schedule-free is called but scheduler is not none."
+
+        self.scheduler, self.hparams.num_epochs = create_scheduler(
+            self.hparams, self.optimizer
+        )
         # save new num_epochs
         self.save_hyperparameters({"num_epochs": self.hparams.num_epochs})
 
@@ -203,6 +218,14 @@ class Net(pl.LightningModule):
         self.print_model_summary()
 
     def on_train_start(self):
+        # schedule-free
+        if self.hparams.schedule_free:
+            self.optimizer = ScheduleFreeWrapperReference(
+                self.optimizer,
+                momentum=self.hparams.momentum,
+                weight_decay_at_y=self.hparams.decay_rate,
+            )
+
         # wandb watch model
         if isinstance(self.logger, pl.loggers.WandbLogger):
             log = {
@@ -276,6 +299,77 @@ class Net(pl.LightningModule):
 
     def _step(self, img, label):
         if self.hparams.trajectory_loss_steps > 0:
+            if self.hparams.cutmix or self.hparams.mixup:
+                img, label, rand_label, lambda_ = self.cutmix_mixup(img, label)
+                assert (
+                    not self.hparams.use_distill_token
+                ), "Trajectory loss is not compatible with distillation token."
+                if self.hparams.stochastic_depth_sigma > 0:
+                    steps = (
+                        (
+                            self.hparams.iterations
+                            + torch.randn(1) * self.hparams.stochastic_depth_sigma
+                        )
+                        .clamp(min=1)
+                        .int()
+                        .item()
+                    )
+                else:
+                    steps = self.hparams.iterations
+                out_steps = self.model._intermediate_layers(
+                    img,
+                    n=list(
+                        range(
+                            max(0, steps - self.hparams.trajectory_loss_steps),
+                            steps,
+                        )
+                    ),
+                    max_iter=steps,
+                )[-1]
+
+                loss_kwargs = {}
+                for key in ["aux_loss", "jac_loss", "stability_loss"]:
+                    if hasattr(self.model, key):
+                        val = getattr(self.model, key)
+                        if val != 0:
+                            loss_kwargs[key] = val
+                            self.log(key, val)
+
+                loss = 0
+                loss_weight = 0 if self.hparams.incremental_trajectory_loss else 1
+                for out_step in out_steps:
+                    out = self.model.forward_head(self.model.norm(out_step))
+                    loss += (
+                        (
+                            self.calculate_loss(
+                                out,
+                                label,
+                                img,
+                                **loss_kwargs,
+                            )
+                            * lambda_
+                        )
+                        + (
+                            self.calculate_loss(
+                                out,
+                                rand_label,
+                                img,
+                                **loss_kwargs,
+                            )
+                            * (1.0 - lambda_)
+                        )
+                    ) * loss_weight
+                    if self.hparams.incremental_trajectory_loss:
+                        loss_weight += 1 / self.hparams.trajectory_loss_steps
+                loss /= min(self.hparams.trajectory_loss_steps, steps) / 2
+            else:
+                raise NotImplementedError(
+                    "trajectory_loss_steps is not implemented for no cutmix or mixup."
+                )
+
+            return out, loss
+
+        if self.hparams.convergence_loss_threshold > 0:
             assert self.hparams.n_deq_layers == 1
             if self.hparams.cutmix or self.hparams.mixup:
                 img, label, rand_label, lambda_ = self.cutmix_mixup(img, label)
@@ -284,11 +378,7 @@ class Net(pl.LightningModule):
                 ), "Trajectory loss is not compatible with distillation token."
                 out_steps = self.model._intermediate_layers(
                     img,
-                    n=list(
-                        range(
-                            self.hparams.iterations - self.hparams.trajectory_loss_steps,  self.hparams.iterations
-                        )
-                    ),
+                    n=list(range(0, self.hparams.iterations)),
                 )[0]
 
                 loss_kwargs = {}
@@ -300,13 +390,30 @@ class Net(pl.LightningModule):
                             self.log(key, val)
 
                 loss = 0
-                for out_step in out_steps:
+                loss_weight = 1
+                # converged_mask = torch.zeros(out_steps.shape[1], device=out_steps.device, dtype=torch.bool)
+                converged_mask = torch.zeros(out_steps.shape[1]).to(out_steps)
+                for i in range(1, len(out_steps)):
+                    step_loss = 0
+                    out_step = out_steps[i]
+                    rel_diff = torch.norm(
+                        out_step - out_steps[i - 1],
+                        p=2,
+                        dim=list(range(1, out_step.ndim)),
+                    ) / torch.norm(
+                        out_steps[i - 1],
+                        p=2,
+                        dim=list(range(1, out_step.ndim)),
+                    )
+
                     out = self.model.forward_head(self.model.norm(out_step))
-                    loss += (
+
+                    step_loss = (
                         self.calculate_loss(
                             out,
                             label,
                             img,
+                            reduction="none",
                             **loss_kwargs,
                         )
                         * lambda_
@@ -315,17 +422,47 @@ class Net(pl.LightningModule):
                             out,
                             rand_label,
                             img,
+                            reduction="none",
                             **loss_kwargs,
                         )
                         * (1.0 - lambda_)
                     )
-                loss /= self.hparams.trajectory_loss_steps
+                    # loss += (step_loss * ~converged_mask).mean() * loss_weight
+                    loss += (step_loss * (1 - converged_mask)).mean() * loss_weight
+                    loss_weight = loss_weight + 0.1
+
+                    # converged_mask = converged_mask + (
+                    #     rel_diff < self.hparams.convergence_loss_threshold
+                    # )
+                    converged_mask = converged_mask + (
+                        1 - converged_mask
+                    ) * torch.nn.functional.sigmoid(
+                        (self.hparams.convergence_loss_threshold - rel_diff) * 10
+                    )
+
+                # loss /= self.hparams.iterations
+                self.log("converged_ratio", converged_mask.float().mean())
             else:
                 raise NotImplementedError(
                     "trajectory_loss_steps is not implemented for no cutmix or mixup."
                 )
-            
+
             return out, loss
+
+        if self.hparams.incremental_iterations:
+            step = int(
+                self.hparams.incremental_iterations_min
+                + (
+                    self.hparams.incremental_iterations_max
+                    - self.hparams.incremental_iterations_min
+                )
+                * self.trainer.current_epoch
+                / self.hparams.num_epochs
+            )
+            if self.model.iterations != step:
+                self.model.iterations = step
+                print(f"[INFO] Iterations changed to {step}.")
+                self.log("iterations", step, on_epoch=True)
 
         if self.hparams.cutmix or self.hparams.mixup:
             img, label, rand_label, lambda_ = self.cutmix_mixup(img, label)
@@ -373,6 +510,8 @@ class Net(pl.LightningModule):
         return out, loss
 
     def on_train_epoch_start(self):
+        if hasattr(self.optimizer, "train"):  # schedule-free
+            self.optimizer.train()
         if self.hparams.use_distill_token:
             self.model.set_distilled_training(True)
 
@@ -413,8 +552,8 @@ class Net(pl.LightningModule):
         """
         super().optimizer_step(*args, **kwargs)
 
-        if hasattr(self.model, "norm_weights_"):
-            self.model.norm_weights_()
+        # if hasattr(self.model, "norm_weights_"):
+        #     self.model.norm_weights_()
 
     def on_train_batch_end(self, out, batch, batch_idx):
         if batch_idx == self.trainer.num_training_batches - 1:  # only on last batch
@@ -422,6 +561,8 @@ class Net(pl.LightningModule):
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
+        if hasattr(self.optimizer, "eval"):
+            self.optimizer.eval()
         img, label = batch
         if hasattr(self.model, "pre_z"):
             self.model.pre_z = None

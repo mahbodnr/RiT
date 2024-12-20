@@ -63,7 +63,9 @@ parser.add_argument('--patience-epochs', type=int, default=10, metavar='N',
                     help='patience epochs for Plateau LR scheduler (default: 10')
 parser.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RATE',
                     help='LR decay rate (default: 0.1)')
-
+parser.add_argument('--lr-k-decay', type=float, default=1.0, metavar='K',
+                    help='K decay factor for cosine annealing')
+parser.add_argument('--schedule-free', action="store_true", help="Use schedule-free optimizer.")
 
 parser.add_argument(
     "--off-benchmark",
@@ -186,7 +188,17 @@ parser.add_argument("--stochastic-depth-sigma", default=0.0, type=float)
 parser.add_argument("--stability-reg", action="store_true")
 parser.add_argument("--stability-reg-weight", default=1.0, type=float)
 parser.add_argument("--trajectory-loss-steps", default=0, type=int)
+parser.add_argument("--incremental-trajectory-loss", action="store_true")
 parser.add_argument("--update-rate", default=1.0, type=float)
+parser.add_argument("--injection", default="none", type=str, choices=["none", "input", "linear", "norm", "linear_norm", "block"])
+parser.add_argument("--convergence-loss-threshold", default=0.0, type=float)
+parser.add_argument("--incremental-iterations", action="store_true")
+parser.add_argument("--incremental-iterations-min", default=1, type=int)
+parser.add_argument("--incremental-iterations-max", default=12, type=int)
+parser.add_argument("--use-head-vit", action="store_true")
+parser.add_argument("--phantom-grad", action="store_true")
+parser.add_argument("--phantom-grad-steps", default=5, type=int)
+parser.add_argument("--phantom-grad-update-rate", default=0.5, type=float)
 # deq args
 parser.add_argument("--f-solver", default="fixed_point_iter", type=str)
 parser.add_argument("--b-solver", default="fixed_point_iter", type=str)
