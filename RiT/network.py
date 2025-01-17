@@ -75,13 +75,16 @@ class Net(pl.LightningModule):
                         "stochastic_depth_sigma",
                         "stability_reg",
                         "stability_reg_weight",
-                        "update_rate",
+                        "update_rate", # old version
                         "injection",
                         "inject_input",  # old version
                         "use_head_vit",
                         "phantom_grad",
                         "phantom_grad_steps",
                         "phantom_grad_update_rate",
+                        "convergence_threshold",
+                        "stable_skip",
+                        "n_pre_layers",
                     ]
                 }
             )
@@ -105,6 +108,21 @@ class Net(pl.LightningModule):
             )
 
         self.model = create_model(model_name=self.hparams.model_name, **kwargs)
+
+        if self.hparams.get("weight_avg_init", False):
+            state = torch.load(model_path)
+            args = argparse.Namespace(**state["hyper_parameters"])
+            args.pin_memory = False
+            args.weight_avg_init = False
+            # Load the model
+            net = Net(args).to(device)
+            net.load_state_dict(
+                state["state_dict"],
+                strict=False,
+            )
+            net = net.to(device)
+            net.eval()
+
         if hparams.distill:
             self.teacher = create_model(
                 model_name=hparams.teacher_model,

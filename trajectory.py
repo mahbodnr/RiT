@@ -26,7 +26,7 @@ parser.add_argument(
 
 # transait
 model_path = (
-    r"model_checkpoints/rtransit_tiny_patch16_224_tiny-imagenet_zfzum_20241218143507.ckpt"
+    r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_cxzee_20241220122634.ckpt"
 )
 
 state = torch.load(model_path)

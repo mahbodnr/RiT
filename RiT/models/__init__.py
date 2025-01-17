@@ -7,3 +7,4 @@ from .deqdistil import *
 from .vit_moe import *
 from .nvit import *
 # from .normalized_vit import *
+from .soft_moe import *

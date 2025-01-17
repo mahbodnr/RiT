@@ -69,12 +69,24 @@ models = {
     # "Small": r"model_checkpoints/transit_small_patch16_224_imagenet_iyfse_20241207195701.ckpt",
     # "Base": r"model_checkpoints/transit_base_patch16_224_imagenet_rugpq_20241211110712.ckpt",
     #Tiny imagenet: 
-    "Transit 4x3": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_jyppv_20241219172741.ckpt",
-    "rTransit 4x3": r"model_checkpoints/rtransit_tiny_patch16_224_tiny-imagenet_abcqx_20241218160959.ckpt",
-    "rTransit 12x3": r"model_checkpoints/rtransit_tiny_patch16_224_tiny-imagenet_zfzum_20241218143507.ckpt",
+    # "Transit 4x3": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_jyppv_20241219172741.ckpt",
+    # "Transit 12x3": r"model_checkpoints/.ckpt",
+    # "rTransit 4x3": r"model_checkpoints/rtransit_tiny_patch16_224_tiny-imagenet_abcqx_20241218160959.ckpt",
+    # "rTransit 12x3": r"model_checkpoints/rtransit_tiny_patch16_224_tiny-imagenet_zfzum_20241218143507.ckpt",
     # Imagenet
     # "12 x 3": r"model_checkpoints/transit_tiny_patch16_224_imagenet_buvxm_20241217155827.ckpt",
     # "3  x 4": r"model_checkpoints/transit_tiny_patch16_224_imagenet_cubip_20241217152746.ckpt",
+
+    # "2 layers linear": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_cxzee_20241220122634.ckpt",
+    # "2 layers block": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_jyfpa_20241220125035.ckpt",
+    # "3 layers": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_jaxwj_20250106131452.ckpt",
+    # "3 layers no head": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_prjqo_20250106131829.ckpt",
+
+    # No injection
+    "1 pre layer": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_fwvti_20250109165446.ckpt",
+    "drop path": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_aptpv_20250109144643.ckpt",
+    "init values": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_kykyl_20250109110554.ckpt",
+
 }
 
 fig = plt.figure(figsize=(12, 14))
@@ -118,7 +130,7 @@ for i, (model_name, model_path) in enumerate(models.items()):
                 data,
                 n=list(range(steps)),
                 max_iter=steps,
-            )[-1]  # [steps, batch, tokens, dim]
+            )  # [steps, batch, tokens, dim]
 
             preds = []
             for out in outputs:

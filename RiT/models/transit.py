@@ -18,7 +18,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.jit import Final
 
-from timm.models.vision_transformer import VisionTransformer
+from timm.models.vision_transformer import VisionTransformer, LayerScale, DropPath
+from timm.models.vision_transformer import Block as ViTBlock
 from timm.models import register_model
 from timm.layers import (
     PatchEmbed,
@@ -29,10 +30,10 @@ from timm.layers import (
     use_fused_attn,
 )
 
-from RiT.models.vit_moe import MoE, BlockMoE
 from RiT.models.normalized_vit import nViTBlock, nViTBlock2, L2Norm, NormLinear
 from torchdeq import get_deq, jac_reg
 from torchdeq.norm import apply_norm, reset_norm
+from soft_mixture_of_experts.transformer import SoftMoEEncoderLayer
 
 
 class Attention(nn.Module):
@@ -152,9 +153,14 @@ class Block(nn.Module):
             proj_drop=proj_drop,
             norm_layer=norm_layer,
         )
-        assert drop_path == 0, "drop path not supported in Vision Transformer"
-        assert init_values is None, "init values not supported in Vision Transformer"
-
+        self.ls1 = (
+            LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        )
+        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.ls2 = (
+            LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        )
+        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.mlp = mlp_layer(
             in_features=dim,
@@ -173,8 +179,8 @@ class BlockBase(Block):
     def forward(
         self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        x = x + self.attn(x)
-        x = x + self.mlp(self.norm1(x))
+        x = x + self.drop_path1(self.ls1(self.attn(x)))
+        x = x + self.drop_path2(self.ls2(self.mlp(self.norm1(x))))
         x = self.norm2(x)
         return x
 
@@ -184,9 +190,9 @@ class BlockPreNorm(Block):
         self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         x = self.norm1(x)
-        x = x + self.attn(x)
+        x = x + self.drop_path1(self.ls1(self.attn(x)))
         x = self.norm2(x)
-        x = x + self.mlp(x)
+        x = x + self.drop_path2(self.ls2(self.mlp(x)))
         return x
 
 
@@ -196,9 +202,9 @@ class BlockPreNormAdd(Block):
     ) -> torch.Tensor:
         x = x + injection
         x = self.norm1(x)
-        x = x + self.attn(x)
+        x = x + self.drop_path1(self.ls1(self.attn(x)))
         x = self.norm2(x)
-        x = x + self.mlp(x)
+        x = x + self.drop_path2(self.ls2(self.mlp(x)))
         return x
 
 
@@ -264,8 +270,8 @@ class BlockAdd(Block):
         self, x: torch.Tensor, injection: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         x = x + injection
-        x = x + self.attn(x)
-        x = x + self.mlp(self.norm1(x))
+        x = x + self.drop_path1(self.ls1(self.attn(x)))
+        x = x + self.drop_path2(self.ls2(self.mlp(self.norm1(x))))
         x = self.norm2(x)
         return x
 
@@ -437,6 +443,7 @@ class Transit(VisionTransformer):
         block_fn: Type[nn.Module] = Block,
         mlp_layer: Type[nn.Module] = Mlp,
         # DEQ specific args
+        n_pre_layers: int = 0,
         n_deq_layers: int = 1,
         iterations: int = 12,
         z_init_type: str = "zero",
@@ -453,6 +460,8 @@ class Transit(VisionTransformer):
         stability_reg_weight: float = 0.1,
         update_rate: float = 1.0,
         use_head_vit: bool = False,
+        convergence_threshold: float = 0,
+        stable_skip: bool = False,
         # phantom grad args
         phantom_grad: bool = False,
         phantom_grad_steps: int = 5,
@@ -521,10 +530,11 @@ class Transit(VisionTransformer):
             block_fn=block_fn,
             mlp_layer=mlp_layer,
         )
-        assert drop_path_rate == 0, "drop path not supported in Vision Transformer"
-        assert init_values is None, "init values not supported in Vision Transformer"
         assert z_init_type in ("zero", "input", "rand", "pre"), "Invalid z_init_type"
-        assert update_rate >= 0 and update_rate <= 1, "Invalid update_rate"
+        # assert update_rate >= 0 and update_rate <= 1, "Invalid update_rate"
+        assert (
+            update_rate == 1
+        ), "'update_rate' is not supported in the current implementation"
         if z_init_type == "pre":
             self.pre_z = None
         self.iterations = iterations
@@ -541,10 +551,32 @@ class Transit(VisionTransformer):
         self.phantom_grad = phantom_grad
         self.phantom_grad_steps = phantom_grad_steps
         self.phantom_grad_update_rate = phantom_grad_update_rate
+        self.convergence_threshold = convergence_threshold
+        self.stable_skip = stable_skip
         norm_layer = get_norm_layer(norm_layer) or partial(nn.LayerNorm, eps=1e-6)
         act_layer = get_act_layer(act_layer) or nn.GELU
 
         del self.blocks
+        self.pre_layers = nn.Sequential(
+            *[
+                ViTBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_norm=qk_norm,
+                    init_values=init_values,
+                    proj_drop=proj_drop_rate,
+                    attn_drop=attn_drop_rate,
+                    drop_path=drop_path_rate,
+                    norm_layer=norm_layer,
+                    act_layer=act_layer,
+                    mlp_layer=mlp_layer,
+                )
+                for _ in range(n_pre_layers)
+            ]
+        )
+
         self.deq_layers = nn.ModuleList()
         for _ in range(n_deq_layers):
             self.deq_layers.append(
@@ -584,7 +616,7 @@ class Transit(VisionTransformer):
                 nn.Linear(embed_dim, embed_dim), L2Norm(dim=-1)
             )
         elif self.injection == "block":
-            self.injection_block = block_fn(
+            self.injection_block = ViTBlock(
                 dim=embed_dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
@@ -597,7 +629,7 @@ class Transit(VisionTransformer):
                 act_layer=act_layer,
                 mlp_layer=mlp_layer,
             )
-            self.injection_transform = lambda x: self.injection_block(x, injection=0)
+            self.injection_transform = lambda x: self.injection_block(x)
 
         elif self.injection in [None, "none"]:
             assert (
@@ -615,7 +647,7 @@ class Transit(VisionTransformer):
         )
 
         if self.use_head_vit:
-            self.head_vit = block_fn(
+            self.head_vit = ViTBlock(
                 dim=embed_dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
@@ -658,21 +690,25 @@ class Transit(VisionTransformer):
         x = self._pos_embed(x)
         x = self.patch_drop(x)
         x = self.norm_pre(x)
+        x = self.pre_layers(x)
         # run deq:
         reset_norm(self.deq_layers)
         u_inj = self.injection_transform(x)
 
-        z = self._init_z(x)
-        outputs = []
-        for blocks in self.deq_layers:
-            steps = max_iter if max_iter is not None else self.iterations
+        for i, blocks in enumerate(self.deq_layers):
+            z = self._init_z(x)
+            steps = (
+                self.iterations
+                if (i != len(self.deq_layers) - 1) or (max_iter is None)
+                else max_iter
+            )
             block_outputs = []
             for t in range(steps):
                 z = self.deq_func(z, blocks=blocks, injection=u_inj)
                 if t in n:
                     block_outputs.append(z)
-            outputs.append(torch.stack(block_outputs))
-        return torch.stack(outputs)
+            u_inj = z
+        return torch.stack(block_outputs)
 
     def _init_z(self, x: torch.Tensor) -> torch.Tensor:
         if self.z_init_type == "zero":
@@ -690,6 +726,36 @@ class Transit(VisionTransformer):
         else:
             raise ValueError(f"Unknown z_init_type {self.z_init_type}")
 
+    def _check_convergence(self, z_new: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        if self.convergence_threshold > 0:
+            rel_diff = (z_new - z).flatten(start_dim=1).norm(dim=1) / (
+                z_new.flatten(start_dim=1).norm(dim=1) + 1e-8
+            )
+            converged = rel_diff < self.convergence_threshold
+            return (
+                torch.lerp(z_new, z, converged.float()[:, *[None] * (z_new.ndim - 1)]),
+                converged,
+            )
+        return z_new, None
+
+    def _log_training_info(
+        self,
+        z_new: torch.Tensor,
+        z: torch.Tensor,
+        i: int,
+        t: int,
+        converged: torch.Tensor,
+    ) -> None:
+        if self.logger is None:
+            return
+        if t == self.iterations - 1:
+            if converged is not None:
+                self.logger(f"Forward/{i}/converged_ratio", converged.float().mean())
+            abs_lowest = (z_new - z).flatten(start_dim=1).norm(dim=1)
+            rel_lowest = abs_lowest / (z_new.flatten(start_dim=1).norm(dim=1) + 1e-8)
+            self.logger(f"Forward/{i}/abs_lowest", abs_lowest.mean())
+            self.logger(f"Forward/{i}/rel_lowest", rel_lowest.mean())
+
     def run_deq(self, x: torch.Tensor) -> torch.Tensor:
         reset_norm(self.deq_layers)
         u_inj = self.injection_transform(x)
@@ -697,7 +763,6 @@ class Transit(VisionTransformer):
         for i, blocks in enumerate(self.deq_layers):
             z = self._init_z(x)
             if self.stochastic_depth_sigma > 0:
-
                 steps = (
                     (
                         self.iterations
@@ -713,36 +778,26 @@ class Transit(VisionTransformer):
             if self.phantom_grad:
                 with torch.no_grad():
                     for t in range(steps):
-                        new_z = self.deq_func(z, blocks=blocks, injection=u_inj)
-                        if t == steps - 1:
-                            abs_lowest = (new_z - z).flatten(start_dim=1).norm(dim=1)
-                            rel_lowest = abs_lowest / (
-                                new_z.flatten(start_dim=1).norm(dim=1) + 1e-8
-                            )
-                            self.logger(f"Forward/{i}/abs_lowest", abs_lowest.mean())
-                            self.logger(f"Forward/{i}/rel_lowest", rel_lowest.mean())
-                        if self.update_rate == 1:
-                            z = new_z
+                        z_new = self.deq_func(z, blocks=blocks, injection=u_inj)
+                        z_new, converged = self._check_convergence(z_new, z)
+                        self._log_training_info(z_new, z, i, t, converged)
+                        if self.stable_skip:
+                            z = z + z_new / steps**0.5
                         else:
-                            z = torch.lerp(z, new_z, self.update_rate)
+                            z = z_new
                 # phantom grad steps
                 for t in range(self.phantom_grad_steps):
-                    new_z = self.deq_func(z, blocks=blocks, injection=u_inj)
-                    z = torch.lerp(z, new_z, self.phantom_grad_update_rate)
+                    z_new = self.deq_func(z, blocks=blocks, injection=u_inj)
+                    z = torch.lerp(z, z_new, self.phantom_grad_update_rate)
             else:
                 for t in range(steps):
-                    new_z = self.deq_func(z, blocks=blocks, injection=u_inj)
-                    if t == steps - 1:
-                        abs_lowest = (new_z - z).flatten(start_dim=1).norm(dim=1)
-                        rel_lowest = abs_lowest / (
-                            new_z.flatten(start_dim=1).norm(dim=1) + 1e-8
-                        )
-                        self.logger(f"Forward/{i}/abs_lowest", abs_lowest.mean())
-                        self.logger(f"Forward/{i}/rel_lowest", rel_lowest.mean())
-                    if self.update_rate == 1:
-                        z = new_z
+                    z_new = self.deq_func(z, blocks=blocks, injection=u_inj)
+                    z_new, converged = self._check_convergence(z_new, z)
+                    self._log_training_info(z_new, z, i, t, converged)
+                    if self.stable_skip:
+                        z = z + z_new / steps**0.5
                     else:
-                        z = torch.lerp(z, new_z, self.update_rate)
+                        z = z_new
 
             u_inj = z
 
@@ -774,6 +829,7 @@ class Transit(VisionTransformer):
         x = self._pos_embed(x)
         x = self.patch_drop(x)
         x = self.norm_pre(x)
+        x = self.pre_layers(x)
         x = self.run_deq(x)
         x = self.norm(x)
         return x
@@ -785,11 +841,11 @@ class Transit(VisionTransformer):
 
     def forward_head(self, x: torch.Tensor, pre_logits: bool = False) -> torch.Tensor:
         if self.use_head_vit:
-            x = self.head_vit(x, injection=0.0)
+            x = self.head_vit(x)
         return super().forward_head(x, pre_logits=pre_logits)
 
 
-class TransitMoE(Transit):
+class TransitSoftMoE(Transit):
     def __init__(
         self,
         img_size: Union[int, Tuple[int, int]] = 224,
@@ -825,55 +881,35 @@ class TransitMoE(Transit):
         block_fn: Type[nn.Module] = Block,
         mlp_layer: Type[nn.Module] = Mlp,
         # DEQ specific args
+        n_pre_layers: int = 0,
         n_deq_layers: int = 1,
+        iterations: int = 12,
         z_init_type: str = "zero",
-        f_solver: str = "fixed_point_iter",
-        b_solver: str = "fixed_point_iter",
-        no_stat: Optional[bool] = None,
-        f_max_iter: int = 40,
-        b_max_iter: int = 40,
-        f_tol: float = 1e-3,
-        b_tol: float = 1e-6,
-        f_stop_mode: str = "abs",
-        b_stop_mode: str = "abs",
-        eval_factor: float = 1.0,
-        eval_f_max_iter: int = 0,
-        ift: bool = False,
-        hook_ift: bool = False,
-        grad: int = 1,
-        tau: float = 1.0,
-        sup_gap: int = -1,
-        sup_loc: Optional[int] = None,
-        n_states: int = 1,
-        indexing: Optional[int] = None,
-        norm_type: Optional[str] = "weight_norm",
+        injection: str = "none",
+        inject_input: bool = False,  # old version of injection
+        norm_type: str = "weight_norm",
         prefix_filter_out: Optional[Union[str, List[str]]] = None,
         filter_out: Optional[Union[str, List[str]]] = None,
+        jac_reg: bool = False,
+        jac_loss_weight: float = 0.1,
+        log_sradius: bool = True,
+        stochastic_depth_sigma: float = 0.0,
+        stability_reg: bool = False,
+        stability_reg_weight: float = 0.1,
+        update_rate: float = 1.0,
+        use_head_vit: bool = False,
+        convergence_threshold: float = 0,
+        stable_skip: bool = False,
+        # phantom grad args
+        phantom_grad: bool = False,
+        phantom_grad_steps: int = 5,
+        phantom_grad_update_rate: float = 0.5,
         logger=None,
         # MOE specific args
-        num_experts: int = 10,
-        gating_top_n: int = 2,
-        threshold_train: float = 0.2,
-        threshold_eval: float = 0.2,
-        capacity_factor_train: float = 1.25,
-        capacity_factor_eval: float = 2.0,
-        balance_loss_coef: float = 1e-2,
-        router_z_loss_coef: float = 1e-3,
+        num_experts: int = 128,
+        slots_per_expert: int = 1,
         **kwargs: Any,
     ) -> None:
-
-        moe = partial(
-            MoE,
-            num_experts=num_experts,
-            expert_hidden_mult=mlp_ratio,
-            gating_top_n=gating_top_n,
-            threshold_train=threshold_train,
-            threshold_eval=threshold_eval,
-            capacity_factor_train=capacity_factor_train,
-            capacity_factor_eval=capacity_factor_eval,
-            balance_loss_coef=balance_loss_coef,
-            router_z_loss_coef=router_z_loss_coef,
-        )
         super().__init__(
             img_size=img_size,
             patch_size=patch_size,
@@ -905,41 +941,66 @@ class TransitMoE(Transit):
             embed_layer=embed_layer,
             norm_layer=norm_layer,
             act_layer=act_layer,
-            block_fn=BlockMoE,
-            mlp_layer=moe,
+            block_fn=block_fn,
+            mlp_layer=mlp_layer,
+            n_pre_layers=n_pre_layers,
             n_deq_layers=n_deq_layers,
+            iterations=iterations,
             z_init_type=z_init_type,
-            f_solver=f_solver,
-            b_solver=b_solver,
-            no_stat=no_stat,
-            f_max_iter=f_max_iter,
-            b_max_iter=b_max_iter,
-            f_tol=f_tol,
-            b_tol=b_tol,
-            f_stop_mode=f_stop_mode,
-            b_stop_mode=b_stop_mode,
-            eval_factor=eval_factor,
-            eval_f_max_iter=eval_f_max_iter,
-            ift=ift,
-            hook_ift=hook_ift,
-            grad=grad,
-            tau=tau,
-            sup_gap=sup_gap,
-            sup_loc=sup_loc,
-            n_states=n_states,
-            indexing=indexing,
+            injection=injection,
+            inject_input=inject_input,
             norm_type=norm_type,
             prefix_filter_out=prefix_filter_out,
             filter_out=filter_out,
+            jac_reg=jac_reg,
+            jac_loss_weight=jac_loss_weight,
+            log_sradius=log_sradius,
+            stochastic_depth_sigma=stochastic_depth_sigma,
+            stability_reg=stability_reg,
+            stability_reg_weight=stability_reg_weight,
+            update_rate=update_rate,
+            use_head_vit=use_head_vit,
+            convergence_threshold=convergence_threshold,
+            stable_skip=stable_skip,
+            phantom_grad=phantom_grad,
+            phantom_grad_steps=phantom_grad_steps,
+            phantom_grad_update_rate=phantom_grad_update_rate,
             logger=logger,
         )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = super().forward(x)
-        self.aux_loss = sum([block.total_aux_loss for block in self.blocks]) / len(
-            self.blocks
-        )
-        return x
+        norm_layer = get_norm_layer(norm_layer) or partial(nn.LayerNorm, eps=1e-6)
+        act_layer = get_act_layer(act_layer) or nn.GELU
+        self.deq_layers = nn.ModuleList()
+        for _ in range(n_deq_layers):
+            self.deq_layers.append(
+                nn.Sequential(
+                    *[
+                        #     block_fn(
+                        #     dim=embed_dim,
+                        #     num_heads=num_heads,
+                        #     mlp_ratio=mlp_ratio,
+                        #     qkv_bias=qkv_bias,
+                        #     qk_norm=qk_norm,
+                        #     init_values=init_values,
+                        #     proj_drop=proj_drop_rate,
+                        #     attn_drop=attn_drop_rate,
+                        #     drop_path=drop_path_rate,
+                        #     norm_layer=norm_layer,
+                        #     act_layer=act_layer,
+                        #     mlp_layer=mlp_layer,
+                        # ),
+                            SoftMoEEncoderLayer(
+                            d_model=embed_dim,
+                            nhead=num_heads,
+                            num_experts=num_experts,
+                            slots_per_expert=slots_per_expert,
+                            # dropout=drop_rate,
+                            # activation=act_layer,
+                            layer_norm_eps=1e-5,
+                            norm_first=False,
+                            ),
+                        ] * depth
+                )
+            )
 
 
 class nTransit(Transit):
@@ -1333,17 +1394,36 @@ def transit_large_patch16_224(
 
 
 @register_model
-def transit_moe_tiny_patch16_224(
+def transit_soft_moe_tiny_patch16_224(
     num_classes: int = 1000,
     pretrained: bool = False,
     **kwargs: Any,
-) -> TransitMoE:
+) -> TransitSoftMoE:
     assert not pretrained, "Pretrained model not available for this configuration"
-    return TransitMoE(
+    return TransitSoftMoE(
         img_size=224,
         patch_size=16,
         embed_dim=192,
         num_heads=3,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
+
+
+@register_model
+def transit_soft_moe_small_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> TransitSoftMoE:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return TransitSoftMoE(
+        img_size=224,
+        patch_size=16,
+        embed_dim=384,
+        num_heads=6,
         mlp_ratio=4.0,
         num_classes=num_classes,
         block_fn=_blocks[kwargs["block_type"]],
@@ -1417,6 +1497,25 @@ def rtransit_tiny_patch16_224(
         patch_size=16,
         embed_dim=192,
         num_heads=3,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
+
+
+@register_model
+def rtransit_small_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> Transit:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return rTransit(
+        img_size=224,
+        patch_size=16,
+        embed_dim=384,
+        num_heads=6,
         mlp_ratio=4.0,
         num_classes=num_classes,
         block_fn=_blocks[kwargs["block_type"]],
