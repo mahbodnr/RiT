@@ -83,9 +83,18 @@ models = {
     # "3 layers no head": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_prjqo_20250106131829.ckpt",
 
     # No injection
-    "1 pre layer": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_fwvti_20250109165446.ckpt",
-    "drop path": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_aptpv_20250109144643.ckpt",
-    "init values": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_kykyl_20250109110554.ckpt",
+    # "1 pre layer": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_fwvti_20250109165446.ckpt",
+    # "drop path": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_aptpv_20250109144643.ckpt",
+    # "init values": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_kykyl_20250109110554.ckpt",
+
+    # "inj-2pre-lin": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_kxfyp_20250117130723.ckpt",
+    # "2pre-5e-4": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_sjafa_20250117130743.ckpt",
+    # "2pre-1e-3": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_wdikf_20250117135944.ckpt",
+    # "4pre-1e-3": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_iraeh_20250117140007.ckpt",
+    
+    "svd": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_ycrvy_20250121152004.ckpt",
+    "svd-2-1": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_qrfew_20250121232350.ckpt",
+    "svd-3-0": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_snjto_20250121233149.ckpt",
 
 }
 
@@ -134,7 +143,7 @@ for i, (model_name, model_path) in enumerate(models.items()):
 
             preds = []
             for out in outputs:
-                pred = net.model.forward_head(net.model.norm(out))
+                pred = net.model.forward_head(net.model.norm(net.model.post_layers(out)))
                 preds.append(pred)
             preds = torch.stack(preds).detach()
 

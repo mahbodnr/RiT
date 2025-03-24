@@ -75,7 +75,7 @@ class Net(pl.LightningModule):
                         "stochastic_depth_sigma",
                         "stability_reg",
                         "stability_reg_weight",
-                        "update_rate", # old version
+                        "update_rate",  # old version
                         "injection",
                         "inject_input",  # old version
                         "use_head_vit",
@@ -85,10 +85,22 @@ class Net(pl.LightningModule):
                         "convergence_threshold",
                         "stable_skip",
                         "n_pre_layers",
+                        "n_post_layers",
+                        "expand_tokens",
+                        "expand_tokens_keep_input",
                     ]
                 }
             )
             kwargs["logger"] = self.log
+        if "cat_vit" in self.hparams.model_name:
+            kwargs.update(
+                {
+                    k: self.hparams[k]
+                    for k in [
+                        "use_v",
+                    ]
+                }
+            )
 
         if "moe" in self.hparams.model_name:
             kwargs.update(
@@ -109,20 +121,6 @@ class Net(pl.LightningModule):
 
         self.model = create_model(model_name=self.hparams.model_name, **kwargs)
 
-        if self.hparams.get("weight_avg_init", False):
-            state = torch.load(model_path)
-            args = argparse.Namespace(**state["hyper_parameters"])
-            args.pin_memory = False
-            args.weight_avg_init = False
-            # Load the model
-            net = Net(args).to(device)
-            net.load_state_dict(
-                state["state_dict"],
-                strict=False,
-            )
-            net = net.to(device)
-            net.eval()
-
         if hparams.distill:
             self.teacher = create_model(
                 model_name=hparams.teacher_model,
@@ -132,6 +130,182 @@ class Net(pl.LightningModule):
             for param in self.teacher.parameters():
                 param.requires_grad = False
             self.teacher.eval()
+
+        if hparams.weight_distill:
+            self.teacher = create_model(
+                model_name=hparams.teacher_model,
+                num_classes=hparams.num_classes,
+            )
+            model_state_dict = torch.load(hparams.teacher_model_path)["state_dict"]
+            state_dict = {k.replace('model.', '', 1): v for k, v in model_state_dict.items()}
+            self.teacher.load_state_dict(
+                state_dict
+            )
+            # distill teacher weights to the model
+            self.model.cls_token = self.teacher.cls_token
+            self.model.patch_embed = self.teacher.patch_embed
+            self.model.pos_drop = self.teacher.pos_drop
+            self.model.patch_drop = self.teacher.patch_drop
+            self.model.pos_embed = self.teacher.pos_embed
+            self.model.norm_pre = self.teacher.norm_pre
+            self.model.norm = self.teacher.norm
+            self.model.head = self.teacher.head
+            self.model.head_drop = self.teacher.head_drop
+            self.model.fc_norm = self.teacher.fc_norm
+            if len(self.model.pre_layers) > 0:
+                for i in range(len(self.model.pre_layers)):
+                    self.model.pre_layers[i] = self.teacher.blocks[i]
+            if len(self.model.post_layers) > 0:
+                for i in range(len(self.model.post_layers)):
+                    self.model.post_layers[i] = self.teacher.blocks[-i - 1]
+
+            assert (
+                len(self.model.deq_layers) == 1 and len(self.model.deq_layers[0]) == 1
+            )
+
+            def get_nested_attribute(module, name):
+                attributes = name.split(".")
+                for attr in attributes:
+                    module = getattr(module, attr)
+                return module
+
+            if hparams.weight_distill_type == "avg":
+                for name, p in self.model.deq_layers[0][0].named_parameters():
+                    blocks = torch.stack(
+                        [
+                            get_nested_attribute(block, name)
+                            for block in self.teacher.blocks[
+                                len(self.model.pre_layers) : -len(
+                                    self.model.post_layers
+                                ) if len(self.model.post_layers) > 0 else None
+                            ]
+                        ]
+                    )
+                    p.data = torch.mean(blocks, dim=0)
+
+            elif hparams.weight_distill_type == "weighted":
+                for name, p in self.model.deq_layers[0][0].named_parameters():
+                    blocks = torch.stack(
+                        [
+                            get_nested_attribute(block, name)
+                            for block in self.teacher.blocks[
+                                len(self.model.pre_layers) : -len(
+                                    self.model.post_layers
+                                ) if len(self.model.post_layers) > 0 else None
+                            ]
+                        ]
+                    )
+                    weights = torch.tensor([1 / (2 ** (i + 1)) for i in range(len(blocks))])
+                    p.data = torch.sum(
+                        blocks * weights.view(-1, *(1,) * (blocks.ndim - 1)), dim=0
+                    )
+            elif hparams.weight_distill_type == "svd":
+                for name, p in self.model.deq_layers[0][0].named_parameters():
+                    blocks = torch.stack(
+                        [
+                            get_nested_attribute(block, name)
+                            for block in self.teacher.blocks[
+                                len(self.model.pre_layers) : -len(
+                                    self.model.post_layers
+                                ) if len(self.model.post_layers) > 0 else None
+                            ]
+                        ]
+                    )
+                    if blocks.ndim == 2:
+                        p.data = torch.mean(blocks, dim=0)
+                    else:
+                        U_list, S_list, V_list = [], [], []
+                        for i in range(len(blocks)):
+                            W = blocks[i]  # Weight matrix of layer i
+                            U, S, Vh = torch.linalg.svd(W, full_matrices=False)  # Compute SVD
+                            U_list.append(U)
+                            S_list.append(S)
+                            V_list.append(Vh.T)
+
+                        # Step 2: Aggregate the singular values
+                        S_aggregate = torch.stack(S_list).mean(dim=0)  # (min(D1, D2))
+                        # Step 3: Align and aggregate the singular vectors
+                        # Align U and V by averaging them directly (optional: apply Procrustes alignment)
+                        U_aggregate = torch.stack(U_list).mean(dim=0)  # (D1, D1)
+                        V_aggregate = torch.stack(V_list).mean(dim=0)  # (D2, D2)
+                        # Step 4: Reconstruct the aggregated weight matrix
+                        # Use the aggregated singular values and vectors to reconstruct the weight matrix
+                        W_reusable = U_aggregate @ torch.diag(S_aggregate) @ V_aggregate.T
+
+                        p.data = W_reusable
+
+            elif hparams.weight_distill_type == "procrustes_alignment":
+                def procrustes_alignment(stack):
+                    """
+                    Aligns matrices in `stack` using Procrustes analysis.
+                    Args:
+                        stack: Tensor of shape (N, D, D) representing a set of square matrices.
+                    Returns:
+                        Aligned tensor of shape (N, D, D).
+                    """
+                    reference = stack[0]  # Use the first matrix as the reference
+                    aligned_stack = []
+                    
+                    for mat in stack:
+                        # Compute the cross-covariance matrix
+                        M = reference.T @ mat
+                        # Perform SVD on M
+                        U, _, Vh = torch.linalg.svd(M)
+                        # Compute the optimal alignment
+                        R = U @ Vh
+                        aligned_stack.append(mat @ R)  # Align mat to the reference
+                    
+                    return torch.stack(aligned_stack)
+
+                for name, p in self.model.deq_layers[0][0].named_parameters():
+                    blocks = torch.stack(
+                        [
+                            get_nested_attribute(block, name)
+                            for block in self.teacher.blocks[
+                                len(self.model.pre_layers) : -len(
+                                    self.model.post_layers
+                                ) if len(self.model.post_layers) > 0 else None
+                            ]
+                        ]
+                    )
+                    if blocks.ndim == 2:
+                        p.data = torch.mean(blocks, dim=0)
+                    else:
+                        k = self.hparams.svd_k  # Number of singular vectors to keep
+                        # Step 1: Perform SVD on each layer's weight matrix
+                        U_list, S_list, V_list = [], [], []
+                        for i in range(len(blocks)):
+                            W = blocks[i]  # Weight matrix of layer i
+                            U, S, Vh = torch.linalg.svd(W, full_matrices=False)  # Compute SVD
+                            U_list.append(U[:, :k])  # Keep the top-k left singular vectors
+                            S_list.append(S[:k])     # Keep the top-k singular values
+                            V_list.append(Vh[:k, :].T)  # Keep the top-k right singular vectors
+
+                        # Convert lists to tensors for easier processing
+                        U_stack = torch.stack(U_list)  # Shape: (N, D1, D1)
+                        V_stack = torch.stack(V_list)  # Shape: (N, D2, D2)
+                        S_stack = torch.stack(S_list)  # Shape: (N, min(D1, D2))
+
+                        # Align U and V matrices
+                        U_aligned = procrustes_alignment(U_stack)  # Shape: (N, D1, D1)
+                        V_aligned = procrustes_alignment(V_stack)  # Shape: (N, D2, D2)
+
+                        # Step 3: Aggregate the singular values and aligned singular vectors
+                        S_aggregate = S_stack.mean(dim=0)  # (min(D1, D2))
+                        U_aggregate = U_aligned.mean(dim=0)  # (D1, D1)
+                        V_aggregate = V_aligned.mean(dim=0)  # (D2, D2)
+
+                        # Step 4: Reconstruct the aggregated weight matrix
+                        W_reusable = U_aggregate @ torch.diag(S_aggregate) @ V_aggregate.T
+
+                        p.data = W_reusable
+
+            else:
+                raise ValueError(
+                    f"Weight distillation type {hparams.weight_distill_type} not implemented."
+                )
+
+            del self.teacher
 
         self.criterion = get_criterion(hparams)
         if hparams.distill:
@@ -334,7 +508,7 @@ class Net(pl.LightningModule):
                     )
                 else:
                     steps = self.hparams.iterations
-                out_steps = self.model._intermediate_layers(
+                out_steps = self.model.post_layers(self.model._intermediate_layers(
                     img,
                     n=list(
                         range(
@@ -343,7 +517,7 @@ class Net(pl.LightningModule):
                         )
                     ),
                     max_iter=steps,
-                )[-1]
+                )[-1])
 
                 loss_kwargs = {}
                 for key in ["aux_loss", "jac_loss", "stability_loss"]:
@@ -394,10 +568,10 @@ class Net(pl.LightningModule):
                 assert (
                     not self.hparams.use_distill_token
                 ), "Trajectory loss is not compatible with distillation token."
-                out_steps = self.model._intermediate_layers(
+                out_steps = self.model.post_layers(self.model._intermediate_layers(
                     img,
                     n=list(range(0, self.hparams.iterations)),
-                )[0]
+                )[0])
 
                 loss_kwargs = {}
                 for key in ["aux_loss", "jac_loss", "stability_loss"]:

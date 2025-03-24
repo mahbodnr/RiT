@@ -34,6 +34,7 @@ from RiT.models.normalized_vit import nViTBlock, nViTBlock2, L2Norm, NormLinear
 from torchdeq import get_deq, jac_reg
 from torchdeq.norm import apply_norm, reset_norm
 from soft_mixture_of_experts.transformer import SoftMoEEncoderLayer
+from .deepseek_moe import getDeepSeekMoEModel
 
 
 class Attention(nn.Module):
@@ -442,8 +443,11 @@ class Transit(VisionTransformer):
         act_layer: Optional[LayerType] = None,
         block_fn: Type[nn.Module] = Block,
         mlp_layer: Type[nn.Module] = Mlp,
+        expand_tokens: bool = False,
+        expand_tokens_keep_input: bool = False,
         # DEQ specific args
         n_pre_layers: int = 0,
+        n_post_layers: int = 0,
         n_deq_layers: int = 1,
         iterations: int = 12,
         z_init_type: str = "zero",
@@ -553,6 +557,8 @@ class Transit(VisionTransformer):
         self.phantom_grad_update_rate = phantom_grad_update_rate
         self.convergence_threshold = convergence_threshold
         self.stable_skip = stable_skip
+        self.expand_tokens = expand_tokens
+        self.expand_tokens_keep_input = expand_tokens_keep_input
         norm_layer = get_norm_layer(norm_layer) or partial(nn.LayerNorm, eps=1e-6)
         act_layer = get_act_layer(act_layer) or nn.GELU
 
@@ -600,6 +606,26 @@ class Transit(VisionTransformer):
                     ]
                 )
             )
+
+        self.post_layers = nn.Sequential(
+            *[
+                ViTBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_norm=qk_norm,
+                    init_values=init_values,
+                    proj_drop=proj_drop_rate,
+                    attn_drop=attn_drop_rate,
+                    drop_path=drop_path_rate,
+                    norm_layer=norm_layer,
+                    act_layer=act_layer,
+                    mlp_layer=mlp_layer,
+                )
+                for _ in range(n_post_layers)
+            ]
+        )
 
         self.injection = injection
         if self.injection == "linear" or inject_input:
@@ -794,7 +820,13 @@ class Transit(VisionTransformer):
                     z_new = self.deq_func(z, blocks=blocks, injection=u_inj)
                     z_new, converged = self._check_convergence(z_new, z)
                     self._log_training_info(z_new, z, i, t, converged)
-                    if self.stable_skip:
+                    if self.expand_tokens and t < steps - 1:
+                        # add a new cls tokene
+                        if self.expand_tokens_keep_input:
+                            z = torch.cat([self.cls_token.expand(z.size(0), -1, -1), z_new[:, 0:1], z[:, 1:]], dim=1)
+                        else:
+                            z = torch.cat([self.cls_token.expand(z.size(0), -1, -1), z_new], dim=1)
+                    elif self.stable_skip:
                         z = z + z_new / steps**0.5
                     else:
                         z = z_new
@@ -831,6 +863,7 @@ class Transit(VisionTransformer):
         x = self.norm_pre(x)
         x = self.pre_layers(x)
         x = self.run_deq(x)
+        x = self.post_layers(x)
         x = self.norm(x)
         return x
 
@@ -882,6 +915,7 @@ class TransitSoftMoE(Transit):
         mlp_layer: Type[nn.Module] = Mlp,
         # DEQ specific args
         n_pre_layers: int = 0,
+        n_post_layers: int = 0,
         n_deq_layers: int = 1,
         iterations: int = 12,
         z_init_type: str = "zero",
@@ -944,6 +978,7 @@ class TransitSoftMoE(Transit):
             block_fn=block_fn,
             mlp_layer=mlp_layer,
             n_pre_layers=n_pre_layers,
+            n_post_layers=n_post_layers,
             n_deq_layers=n_deq_layers,
             iterations=iterations,
             z_init_type=z_init_type,
@@ -1305,7 +1340,150 @@ class rTransit(Transit):
         return super().forward_head(x, pre_logits=pre_logits)
 
 
+class TransitDMoE(Transit):
+    def __init__(
+        self,
+        img_size: Union[int, Tuple[int, int]] = 224,
+        patch_size: Union[int, Tuple[int, int]] = 16,
+        in_chans: int = 3,
+        num_classes: int = 1000,
+        global_pool: Literal["", "avg", "token", "map"] = "token",
+        embed_dim: int = 768,
+        depth: int = 1,
+        num_heads: int = 12,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        qk_norm: bool = False,
+        init_values: Optional[float] = None,
+        class_token: bool = True,
+        no_embed_class: bool = False,
+        reg_tokens: int = 0,
+        pre_norm: bool = False,
+        fc_norm: Optional[bool] = None,
+        dynamic_img_size: bool = False,
+        dynamic_img_pad: bool = False,
+        drop_rate: float = 0.0,
+        pos_drop_rate: float = 0.0,
+        patch_drop_rate: float = 0.0,
+        proj_drop_rate: float = 0.0,
+        attn_drop_rate: float = 0.0,
+        drop_path_rate: float = 0.0,
+        weight_init: Literal["skip", "jax", "jax_nlhb", "moco", ""] = "",
+        fix_init: bool = False,
+        embed_layer: Callable = PatchEmbed,
+        norm_layer: Optional[LayerType] = None,
+        act_layer: Optional[LayerType] = None,
+        block_fn: Type[nn.Module] = Block,
+        mlp_layer: Type[nn.Module] = Mlp,
+        # DEQ specific args
+        n_deq_layers: int = 1,
+        iterations: int = 12,
+        z_init_type: str = "zero",
+        injection: str = "none",
+        inject_input: bool = False,  # old version of injection
+        norm_type: str = "weight_norm",
+        prefix_filter_out: Optional[Union[str, List[str]]] = None,
+        filter_out: Optional[Union[str, List[str]]] = None,
+        jac_reg: bool = False,
+        jac_loss_weight: float = 0.1,
+        log_sradius: bool = True,
+        stochastic_depth_sigma: float = 0.0,
+        stability_reg: bool = False,
+        stability_reg_weight: float = 0.1,
+        update_rate: float = 1.0,
+        use_head_vit: bool = False,
+        # phantom grad args
+        phantom_grad: bool = False,
+        phantom_grad_steps: int = 5,
+        phantom_grad_update_rate: float = 0.5,
+        logger=None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            num_classes=num_classes,
+            global_pool=global_pool,
+            embed_dim=embed_dim,
+            depth=depth,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            init_values=init_values,
+            class_token=class_token,
+            no_embed_class=no_embed_class,
+            reg_tokens=reg_tokens,
+            pre_norm=pre_norm,
+            fc_norm=fc_norm,
+            dynamic_img_size=dynamic_img_size,
+            dynamic_img_pad=dynamic_img_pad,
+            drop_rate=drop_rate,
+            pos_drop_rate=pos_drop_rate,
+            patch_drop_rate=patch_drop_rate,
+            proj_drop_rate=proj_drop_rate,
+            attn_drop_rate=attn_drop_rate,
+            drop_path_rate=drop_path_rate,
+            weight_init=weight_init,
+            fix_init=fix_init,
+            embed_layer=embed_layer,
+            norm_layer=norm_layer,
+            act_layer=act_layer,
+            block_fn=block_fn,
+            mlp_layer=mlp_layer,
+            n_deq_layers=n_deq_layers,
+            iterations=iterations,
+            z_init_type=z_init_type,
+            injection=injection,
+            inject_input=inject_input,
+            norm_type=norm_type,
+            prefix_filter_out=prefix_filter_out,
+            filter_out=filter_out,
+            jac_reg=jac_reg,
+            jac_loss_weight=jac_loss_weight,
+            log_sradius=log_sradius,
+            stochastic_depth_sigma=stochastic_depth_sigma,
+            stability_reg=stability_reg,
+            stability_reg_weight=stability_reg_weight,
+            update_rate=update_rate,
+            use_head_vit=use_head_vit,
+            phantom_grad=phantom_grad,
+            phantom_grad_steps=phantom_grad_steps,
+            phantom_grad_update_rate=phantom_grad_update_rate,
+            logger=logger,
+            **kwargs,
+        )
+        norm_layer = get_norm_layer(norm_layer) or partial(nn.LayerNorm, eps=1e-6)
+        act_layer = get_act_layer(act_layer) or nn.GELU
+
+        self.deq_layers = nn.ModuleList()
+        for _ in range(n_deq_layers):
+            self.deq_layers.append(
+                nn.Sequential(
+                    *[
+                        block_fn(
+                            dim=embed_dim,
+                            num_heads=num_heads,
+                            mlp_ratio=mlp_ratio,
+                            qkv_bias=qkv_bias,
+                            qk_norm=qk_norm,
+                            init_values=init_values,
+                            proj_drop=proj_drop_rate,
+                            attn_drop=attn_drop_rate,
+                            drop_path=drop_path_rate,
+                            norm_layer=norm_layer,
+                            act_layer=act_layer,
+                            mlp_layer=getDeepSeekMoEModel,
+                        )
+                        for i in range(depth)
+                    ]
+                )
+            )
+
+
 _blocks = {
+    "vit": ViTBlock,
     "base": BlockBase,
     "prenorm": BlockPreNorm,
     "prenorm_add": BlockPreNormAdd,
@@ -1516,6 +1694,25 @@ def rtransit_small_patch16_224(
         patch_size=16,
         embed_dim=384,
         num_heads=6,
+        mlp_ratio=4.0,
+        num_classes=num_classes,
+        block_fn=_blocks[kwargs["block_type"]],
+        **kwargs,
+    )
+
+
+@register_model
+def transit_dmoe_tiny_patch16_224(
+    num_classes: int = 1000,
+    pretrained: bool = False,
+    **kwargs: Any,
+) -> TransitDMoE:
+    assert not pretrained, "Pretrained model not available for this configuration"
+    return TransitDMoE(
+        img_size=224,
+        patch_size=16,
+        embed_dim=192,
+        num_heads=3,
         mlp_ratio=4.0,
         num_classes=num_classes,
         block_fn=_blocks[kwargs["block_type"]],
