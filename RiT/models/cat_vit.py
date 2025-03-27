@@ -32,7 +32,7 @@ class CatAttention(nn.Module):
         self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(2 * dim, 2* dim)
+        self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -53,9 +53,9 @@ class CatAttention(nn.Module):
         new_x = attn @ v
         new_x = new_x.transpose(1, 2).reshape(B, N, C)
 
+        new_x = self.proj(new_x)
+        new_x = self.proj_drop(new_x)
         x = torch.cat([x, new_x], dim=-1)
-        x = self.proj(x)
-        x = self.proj_drop(x)
         return x
     
 
@@ -69,28 +69,35 @@ class CatViTBlock(nn.Module):
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim, eps=1e-6)
-        self.attn = CatAttention(
+        # self.attn = CatAttention(
+        #     dim,
+        #     num_heads=num_heads,
+        #     qkv_bias=qkv_bias,
+        #     attn_drop=drop,
+        #     proj_drop=drop,
+        #     use_v = use_v,
+        # )
+        from timm.models.vision_transformer import Attention
+        self.attn = Attention(
             dim,
             num_heads=num_heads,
             qkv_bias=qkv_bias,
             attn_drop=drop,
             proj_drop=drop,
-            use_v = use_v,
         )
-        self.norm2 = nn.LayerNorm(2*dim, eps=1e-6)
+        self.norm2 = nn.LayerNorm(2* dim, eps=1e-6)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(
-            in_features=2*dim,
+            in_features=2 * dim,
             hidden_features=mlp_hidden_dim,
-            # out_features=dim,
-            out_features=2*dim,
+            out_features=2 * dim,
             act_layer=nn.GELU,
             drop=drop,
         )
         self.proj = nn.Linear(2*dim, dim)
 
     def forward(self, x):
-        x = self.attn(self.norm1(x))
+        x = torch.cat([x ,self.attn(self.norm1(x))], dim = -1)
         x = x + self.mlp(self.norm2(x))
         x = self.proj(x)
         return x

@@ -389,11 +389,11 @@ class Net(pl.LightningModule):
                 None,
             ], "Schedule-free is called but scheduler is not none."
 
-        self.scheduler, self.hparams.num_epochs = create_scheduler(
+        self.scheduler, self.hparams.epochs = create_scheduler(
             self.hparams, self.optimizer
         )
-        # save new num_epochs
-        self.save_hyperparameters({"num_epochs": self.hparams.num_epochs})
+        # save new epochs
+        self.save_hyperparameters({"epochs": self.hparams.epochs})
 
         if self.scheduler is None:
             return self.optimizer
@@ -649,7 +649,7 @@ class Net(pl.LightningModule):
                     - self.hparams.incremental_iterations_min
                 )
                 * self.trainer.current_epoch
-                / self.hparams.num_epochs
+                / self.hparams.epochs
             )
             if self.model.iterations != step:
                 self.model.iterations = step
@@ -735,7 +735,7 @@ class Net(pl.LightningModule):
         if self.hparams.log_layer_outputs:
             self.log_layer_outputs()
 
-        if self.current_epoch == self.hparams.num_epochs:
+        if self.current_epoch == self.hparams.epochs:
             self.trainer.should_stop = True
 
     def optimizer_step(self, *args, **kwargs):

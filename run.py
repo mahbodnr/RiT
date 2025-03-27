@@ -73,7 +73,7 @@ parser.add_argument(
     dest="trainer_benchmark",
     help="The value (True or False) to set torch.backends.cudnn.benchmark to. The value for torch.backends.cudnn.benchmark set in the current session will be used (False if not manually set). If deterministic is set to True, this will default to False. You can read more about the interaction of torch.backends.cudnn.benchmark and torch.backends.cudnn.deterministic. Setting this flag to True can increase the speed of your system if your input sizes don’t change. However, if they do, then it might make your system slower. The CUDNN auto-tuner will try to find the best algorithm for the hardware when a new input size is encountered. This might also increase the memory usage.",
 )
-parser.add_argument("--num-epochs", default=100, type=int)
+parser.add_argument("--epochs", default=100, type=int)
 parser.add_argument(
     "--precision",
     default="32-true",

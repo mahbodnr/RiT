@@ -64,7 +64,7 @@ def get_scheduler(optimizer, args):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=(
-                args.num_epochs
+                args.epochs
                 if args.get("lr_scheduler_T_max", None) is None
                 else args.lr_scheduler_T_max
             ),
