@@ -1,8 +1,12 @@
+import os
 import time
 import pytorch_lightning as pl
 import torch
+import torch.nn.functional as F
+import numpy as np
 import wandb
 from tqdm import tqdm
+
 
 from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.scheduler import create_scheduler
@@ -54,6 +58,7 @@ class Net(pl.LightningModule):
                 "drop_path_rate",
                 "weight_init",
                 "fix_init",
+                "norm_layer",
             ]
         }
         if "transit" in self.hparams.model_name:
@@ -118,7 +123,16 @@ class Net(pl.LightningModule):
                     ]
                 }
             )
-
+        if "wtvit" in self.hparams.model_name:
+            kwargs.update(
+                {
+                    k: self.hparams[k]
+                    for k in [
+                        "n_pre_layers",
+                        "n_post_layers",
+                    ]
+                }
+            )
         self.model = create_model(model_name=self.hparams.model_name, **kwargs)
 
         if hparams.distill:
@@ -137,10 +151,13 @@ class Net(pl.LightningModule):
                 num_classes=hparams.num_classes,
             )
             model_state_dict = torch.load(hparams.teacher_model_path)["state_dict"]
-            state_dict = {k.replace('model.', '', 1): v for k, v in model_state_dict.items()}
-            self.teacher.load_state_dict(
-                state_dict
-            )
+            state_dict = {
+                k.replace("model.", "", 1): v for k, v in model_state_dict.items()
+            }
+            state_dict = {
+                k.replace("teacher.", "", 1): v for k, v in state_dict.items()
+            }
+            self.teacher.load_state_dict(state_dict, strict=False)
             # distill teacher weights to the model
             self.model.cls_token = self.teacher.cls_token
             self.model.patch_embed = self.teacher.patch_embed
@@ -175,9 +192,11 @@ class Net(pl.LightningModule):
                         [
                             get_nested_attribute(block, name)
                             for block in self.teacher.blocks[
-                                len(self.model.pre_layers) : -len(
-                                    self.model.post_layers
-                                ) if len(self.model.post_layers) > 0 else None
+                                len(self.model.pre_layers) : (
+                                    -len(self.model.post_layers)
+                                    if len(self.model.post_layers) > 0
+                                    else None
+                                )
                             ]
                         ]
                     )
@@ -189,13 +208,17 @@ class Net(pl.LightningModule):
                         [
                             get_nested_attribute(block, name)
                             for block in self.teacher.blocks[
-                                len(self.model.pre_layers) : -len(
-                                    self.model.post_layers
-                                ) if len(self.model.post_layers) > 0 else None
+                                len(self.model.pre_layers) : (
+                                    -len(self.model.post_layers)
+                                    if len(self.model.post_layers) > 0
+                                    else None
+                                )
                             ]
                         ]
                     )
-                    weights = torch.tensor([1 / (2 ** (i + 1)) for i in range(len(blocks))])
+                    weights = torch.tensor(
+                        [1 / (2 ** (i + 1)) for i in range(len(blocks))]
+                    )
                     p.data = torch.sum(
                         blocks * weights.view(-1, *(1,) * (blocks.ndim - 1)), dim=0
                     )
@@ -205,9 +228,11 @@ class Net(pl.LightningModule):
                         [
                             get_nested_attribute(block, name)
                             for block in self.teacher.blocks[
-                                len(self.model.pre_layers) : -len(
-                                    self.model.post_layers
-                                ) if len(self.model.post_layers) > 0 else None
+                                len(self.model.pre_layers) : (
+                                    -len(self.model.post_layers)
+                                    if len(self.model.post_layers) > 0
+                                    else None
+                                )
                             ]
                         ]
                     )
@@ -217,7 +242,9 @@ class Net(pl.LightningModule):
                         U_list, S_list, V_list = [], [], []
                         for i in range(len(blocks)):
                             W = blocks[i]  # Weight matrix of layer i
-                            U, S, Vh = torch.linalg.svd(W, full_matrices=False)  # Compute SVD
+                            U, S, Vh = torch.linalg.svd(
+                                W, full_matrices=False
+                            )  # Compute SVD
                             U_list.append(U)
                             S_list.append(S)
                             V_list.append(Vh.T)
@@ -230,11 +257,14 @@ class Net(pl.LightningModule):
                         V_aggregate = torch.stack(V_list).mean(dim=0)  # (D2, D2)
                         # Step 4: Reconstruct the aggregated weight matrix
                         # Use the aggregated singular values and vectors to reconstruct the weight matrix
-                        W_reusable = U_aggregate @ torch.diag(S_aggregate) @ V_aggregate.T
+                        W_reusable = (
+                            U_aggregate @ torch.diag(S_aggregate) @ V_aggregate.T
+                        )
 
                         p.data = W_reusable
 
             elif hparams.weight_distill_type == "procrustes_alignment":
+
                 def procrustes_alignment(stack):
                     """
                     Aligns matrices in `stack` using Procrustes analysis.
@@ -245,7 +275,7 @@ class Net(pl.LightningModule):
                     """
                     reference = stack[0]  # Use the first matrix as the reference
                     aligned_stack = []
-                    
+
                     for mat in stack:
                         # Compute the cross-covariance matrix
                         M = reference.T @ mat
@@ -254,7 +284,7 @@ class Net(pl.LightningModule):
                         # Compute the optimal alignment
                         R = U @ Vh
                         aligned_stack.append(mat @ R)  # Align mat to the reference
-                    
+
                     return torch.stack(aligned_stack)
 
                 for name, p in self.model.deq_layers[0][0].named_parameters():
@@ -262,9 +292,11 @@ class Net(pl.LightningModule):
                         [
                             get_nested_attribute(block, name)
                             for block in self.teacher.blocks[
-                                len(self.model.pre_layers) : -len(
-                                    self.model.post_layers
-                                ) if len(self.model.post_layers) > 0 else None
+                                len(self.model.pre_layers) : (
+                                    -len(self.model.post_layers)
+                                    if len(self.model.post_layers) > 0
+                                    else None
+                                )
                             ]
                         ]
                     )
@@ -276,10 +308,16 @@ class Net(pl.LightningModule):
                         U_list, S_list, V_list = [], [], []
                         for i in range(len(blocks)):
                             W = blocks[i]  # Weight matrix of layer i
-                            U, S, Vh = torch.linalg.svd(W, full_matrices=False)  # Compute SVD
-                            U_list.append(U[:, :k])  # Keep the top-k left singular vectors
-                            S_list.append(S[:k])     # Keep the top-k singular values
-                            V_list.append(Vh[:k, :].T)  # Keep the top-k right singular vectors
+                            U, S, Vh = torch.linalg.svd(
+                                W, full_matrices=False
+                            )  # Compute SVD
+                            U_list.append(
+                                U[:, :k]
+                            )  # Keep the top-k left singular vectors
+                            S_list.append(S[:k])  # Keep the top-k singular values
+                            V_list.append(
+                                Vh[:k, :].T
+                            )  # Keep the top-k right singular vectors
 
                         # Convert lists to tensors for easier processing
                         U_stack = torch.stack(U_list)  # Shape: (N, D1, D1)
@@ -296,7 +334,9 @@ class Net(pl.LightningModule):
                         V_aggregate = V_aligned.mean(dim=0)  # (D2, D2)
 
                         # Step 4: Reconstruct the aggregated weight matrix
-                        W_reusable = U_aggregate @ torch.diag(S_aggregate) @ V_aggregate.T
+                        W_reusable = (
+                            U_aggregate @ torch.diag(S_aggregate) @ V_aggregate.T
+                        )
 
                         p.data = W_reusable
 
@@ -304,6 +344,136 @@ class Net(pl.LightningModule):
                 raise ValueError(
                     f"Weight distillation type {hparams.weight_distill_type} not implemented."
                 )
+
+            del self.teacher
+
+        if hparams.expand_weights:
+            teacher_kwargs = kwargs.copy()
+            if "transit" in self.hparams.teacher_model:
+                teacher_kwargs.update(
+                    {
+                        k: self.hparams.get(k, None)
+                        for k in [
+                            "iterations",
+                            "n_deq_layers",
+                            "depth",
+                            "block_type",
+                            "z_init_type",
+                            "norm_type",
+                            "prefix_filter_out",
+                            "filter_out",
+                            "jac_reg",
+                            "jac_loss_weight",
+                            "log_sradius",
+                            "stochastic_depth_sigma",
+                            "stability_reg",
+                            "stability_reg_weight",
+                            "update_rate",  # old version
+                            "injection",
+                            "inject_input",  # old version
+                            "use_head_vit",
+                            "phantom_grad",
+                            "phantom_grad_steps",
+                            "phantom_grad_update_rate",
+                            "convergence_threshold",
+                            "stable_skip",
+                            "n_pre_layers",
+                            "n_post_layers",
+                            "expand_tokens",
+                            "expand_tokens_keep_input",
+                        ]
+                    }
+                )
+            self.teacher = create_model(
+                model_name=hparams.teacher_model,
+                **teacher_kwargs,
+            )
+            model_state_dict = torch.load(hparams.teacher_model_path)["state_dict"]
+            state_dict = {
+                k.replace("model.", "", 1): v for k, v in model_state_dict.items()
+            }
+            self.teacher.load_state_dict(state_dict)
+            # distill teacher weights to the model
+            self.model.cls_token = self.teacher.cls_token
+            self.model.patch_embed = self.teacher.patch_embed
+            self.model.pos_drop = self.teacher.pos_drop
+            self.model.patch_drop = self.teacher.patch_drop
+            self.model.pos_embed = self.teacher.pos_embed
+            self.model.norm_pre = self.teacher.norm_pre
+            self.model.norm = self.teacher.norm
+            self.model.head = self.teacher.head
+            self.model.head_drop = self.teacher.head_drop
+            self.model.fc_norm = self.teacher.fc_norm
+            if len(self.teacher.pre_layers) > 0:
+                for i in range(len(self.teacher.pre_layers)):
+                    layer = self.teacher.pre_layers[i]
+                    self.model.blocks[i].norm1 = layer.norm1
+                    self.model.blocks[i].norm2 = layer.norm2
+                    self.model.blocks[i].attn.qkv = layer.attn.qkv
+                    self.model.blocks[i].attn.proj = layer.attn.proj
+                    self.model.blocks[i].attn.q_norm = layer.attn.q_norm
+                    self.model.blocks[i].attn.k_norm = layer.attn.k_norm
+                    self.model.blocks[i].attn.attn_drop = layer.attn.attn_drop
+                    self.model.blocks[i].attn.proj_drop = layer.attn.proj_drop
+                    self.model.blocks[i].ls1 = layer.ls1
+                    self.model.blocks[i].ls2 = layer.ls2
+                    self.model.blocks[i].drop_path1 = layer.drop_path1
+                    self.model.blocks[i].drop_path2 = layer.drop_path2
+                    self.model.blocks[i].mlp.fc1 = layer.mlp.fc1
+                    self.model.blocks[i].mlp.fc2 = layer.mlp.fc2
+                    self.model.blocks[i].mlp.drop1 = layer.mlp.drop1
+                    self.model.blocks[i].mlp.drop2 = layer.mlp.drop2
+                    self.model.blocks[i].mlp.act = layer.mlp.act
+                    self.model.blocks[i].mlp.norm = layer.mlp.norm
+            if len(self.teacher.post_layers) > 0:
+                for i in range(len(self.teacher.post_layers)):
+                    layer = self.teacher.post_layers[i]
+                    self.model.blocks[-i - 1].norm1 = layer.norm1
+                    self.model.blocks[-i - 1].norm2 = layer.norm2
+                    self.model.blocks[-i - 1].attn.qkv = layer.attn.qkv
+                    self.model.blocks[-i - 1].attn.proj = layer.attn.proj
+                    self.model.blocks[-i - 1].attn.q_norm = layer.attn.q_norm
+                    self.model.blocks[-i - 1].attn.k_norm = layer.attn.k_norm
+                    self.model.blocks[-i - 1].attn.attn_drop = layer.attn.attn_drop
+                    self.model.blocks[-i - 1].attn.proj_drop = layer.attn.proj_drop
+                    self.model.blocks[-i - 1].ls1 = layer.ls1
+                    self.model.blocks[-i - 1].ls2 = layer.ls2
+                    self.model.blocks[-i - 1].drop_path1 = layer.drop_path1
+                    self.model.blocks[-i - 1].drop_path2 = layer.drop_path2
+                    self.model.blocks[-i - 1].mlp.fc1 = layer.mlp.fc1
+                    self.model.blocks[-i - 1].mlp.fc2 = layer.mlp.fc2
+                    self.model.blocks[-i - 1].mlp.drop1 = layer.mlp.drop1
+                    self.model.blocks[-i - 1].mlp.drop2 = layer.mlp.drop2
+                    self.model.blocks[-i - 1].mlp.act = layer.mlp.act
+                    self.model.blocks[-i - 1].mlp.norm = layer.mlp.norm
+            assert (
+                len(self.teacher.deq_layers) == 1
+                and len(self.teacher.deq_layers[0]) == 1
+            )
+            main_layer = self.teacher.deq_layers[0][0]
+
+            for i in range(
+                len(self.teacher.pre_layers),
+                len(self.model.blocks) - len(self.teacher.post_layers),
+            ):
+                self.model.blocks[i].norm1 = main_layer.norm1
+                self.model.blocks[i].norm2 = main_layer.norm2
+                self.model.blocks[i].attn.qkv = main_layer.attn.qkv
+                self.model.blocks[i].attn.proj = main_layer.attn.proj
+                self.model.blocks[i].attn.q_norm = main_layer.attn.q_norm
+                self.model.blocks[i].attn.k_norm = main_layer.attn.k_norm
+                self.model.blocks[i].attn.attn_drop = main_layer.attn.attn_drop
+                self.model.blocks[i].attn.proj_drop = main_layer.attn.proj_drop
+                self.model.blocks[i].ls1 = main_layer.ls1
+                self.model.blocks[i].ls2 = main_layer.ls2
+                self.model.blocks[i].drop_path1 = main_layer.drop_path1
+                self.model.blocks[i].drop_path2 = main_layer.drop_path2
+                self.model.blocks[i].mlp.fc1 = main_layer.mlp.fc1
+                self.model.blocks[i].mlp.fc2 = main_layer.mlp.fc2
+                self.model.blocks[i].mlp.drop1 = main_layer.mlp.drop1
+                self.model.blocks[i].mlp.drop2 = main_layer.mlp.drop2
+                self.model.blocks[i].mlp.act = main_layer.mlp.act
+                self.model.blocks[i].mlp.norm = main_layer.mlp.norm
 
             del self.teacher
 
@@ -389,9 +559,17 @@ class Net(pl.LightningModule):
                 None,
             ], "Schedule-free is called but scheduler is not none."
 
-        self.scheduler, self.hparams.epochs = create_scheduler(
-            self.hparams, self.optimizer
-        )
+        if self.hparams.lr_cycle_steps > 0:
+            epochs = self.hparams.epochs
+            self.hparams.epochs = self.hparams.lr_cycle_steps 
+            self.scheduler, _ = create_scheduler(
+                self.hparams, self.optimizer
+            )
+            self.hparams.epochs = epochs
+        else:
+            self.scheduler, self.hparams.epochs = create_scheduler(
+                self.hparams, self.optimizer
+            )
         # save new epochs
         self.save_hyperparameters({"epochs": self.hparams.epochs})
 
@@ -508,7 +686,7 @@ class Net(pl.LightningModule):
                     )
                 else:
                     steps = self.hparams.iterations
-                out_steps = self.model.post_layers(self.model._intermediate_layers(
+                out_steps = self.model._intermediate_layers(
                     img,
                     n=list(
                         range(
@@ -517,7 +695,7 @@ class Net(pl.LightningModule):
                         )
                     ),
                     max_iter=steps,
-                )[-1])
+                )
 
                 loss_kwargs = {}
                 for key in ["aux_loss", "jac_loss", "stability_loss"]:
@@ -530,7 +708,7 @@ class Net(pl.LightningModule):
                 loss = 0
                 loss_weight = 0 if self.hparams.incremental_trajectory_loss else 1
                 for out_step in out_steps:
-                    out = self.model.forward_head(self.model.norm(out_step))
+                    out = self.model.forward_head(self.model.norm(self.model.post_layers(out_step)))
                     loss += (
                         (
                             self.calculate_loss(
@@ -568,10 +746,12 @@ class Net(pl.LightningModule):
                 assert (
                     not self.hparams.use_distill_token
                 ), "Trajectory loss is not compatible with distillation token."
-                out_steps = self.model.post_layers(self.model._intermediate_layers(
-                    img,
-                    n=list(range(0, self.hparams.iterations)),
-                )[0])
+                out_steps = self.model.post_layers(
+                    self.model._intermediate_layers(
+                        img,
+                        n=list(range(0, self.hparams.iterations)),
+                    )[0]
+                )
 
                 loss_kwargs = {}
                 for key in ["aux_loss", "jac_loss", "stability_loss"]:
@@ -722,6 +902,18 @@ class Net(pl.LightningModule):
         }
 
     def on_train_epoch_end(self):
+        if (self.hparams.weight_tie_cycle > 0) and (self.current_epoch>0) and (self.current_epoch % self.hparams.weight_tie_cycle == 0):
+            if self.model.weight_tie:
+                print(
+                    f"\n\n[INFO] Relaxing weights at epoch {self.current_epoch}."
+                )
+                self.model.relax_weights()
+            else:
+                print(
+                    f"\n\n[INFO] Tying weights at epoch {self.current_epoch}."
+                )
+                self.model.tie_weights()
+
         if self.hparams.use_distill_token:
             self.model.set_distilled_training(False)
         # log learning rate
@@ -737,6 +929,97 @@ class Net(pl.LightningModule):
 
         if self.current_epoch == self.hparams.epochs:
             self.trainer.should_stop = True
+
+        if self.hparams.log_iterations_conv:
+            steps = self.hparams.iterations * 2
+            loss = torch.zeros(steps, device=self.device)
+            accuracy = torch.zeros(steps, device=self.device)
+            test_dl = self.trainer.val_dataloaders
+            if isinstance(test_dl, list):
+                test_dl = test_dl[0]
+            with torch.no_grad():
+                for i, (data, label) in enumerate(test_dl):
+                    data, label = data.to(self.device), label.to(self.device)
+                    outputs = self.model._intermediate_layers(
+                        data,
+                        n=list(range(steps)),
+                        max_iter=steps,
+                    )  # [steps, batch, tokens, dim]
+
+                    preds = []
+                    for out in outputs:
+                        pred = self.model.forward_head(
+                            self.model.norm(self.model.post_layers(out))
+                        )
+                        preds.append(pred)
+                    preds = torch.stack(preds).detach()
+
+                    batch_loss = []
+                    batch_accuracy = []
+                    for pred in preds:
+                        batch_loss.append(F.cross_entropy(pred, label))
+                        batch_accuracy.append((pred.argmax(-1) == label).float().mean())
+                    loss += torch.stack(batch_loss)
+                    accuracy += torch.stack(batch_accuracy)
+
+                    if i == 5:
+                        break
+            loss /= i + 1
+            accuracy /= i + 1
+
+            loss = loss.cpu().numpy()
+            accuracy = accuracy.cpu().numpy()
+
+            plt.figure(figsize=(6, 8))
+            plt.subplot(3, 1, 1)
+            x_axis = torch.arange(1, len(loss) + 1)
+            plt.plot(x_axis, loss)
+            plt.axvline(
+                x=self.hparams.iterations, color="red", linestyle="--", alpha=0.5
+            )
+            plt.title(f"Performance - epoch {self.current_epoch}")
+            plt.xlabel("Iterations")
+            plt.ylabel("Cross Entropy Loss")
+            # plt.yscale("log")
+            plt.subplot(3, 1, 2)
+            plt.plot(x_axis, accuracy)
+            plt.axvline(
+                x=self.hparams.iterations, color="red", linestyle="--", alpha=0.5
+            )
+            plt.xlabel("Iterations")
+            plt.ylabel("Accuracy")
+            # plt.yscale("log")
+
+            conv = lambda x: np.linalg.norm(
+                (x[1:] - x[:-1]).reshape((x.shape[0] - 1, -1)), axis=1
+            ) / np.linalg.norm(x[1:].reshape((x.shape[0] - 1, -1)), axis=1)
+            plt.subplot(3, 1, 3)
+            plt.plot(torch.arange(1, len(outputs)), conv(outputs.cpu()))
+            plt.axvline(
+                x=self.hparams.iterations, color="red", linestyle="--", alpha=0.5
+            )
+            plt.title(r"Block outputs convergence")
+            plt.xlabel("Iterations")
+            plt.ylabel(r"$(x_{i+1} - x_{i})^2/x_{i+1}^2$")
+            plt.yscale("log")
+
+            path = os.path.join(
+                self.logger.save_dir,
+                f"iterations_convergence_{self.current_epoch}.png",
+            )
+            plt.savefig(
+                path,
+                # dpi=300,
+            )
+            # save to wandb logger using log_image
+            if isinstance(self.logger, pl.loggers.WandbLogger):
+                self.logger.experiment.log(
+                    {
+                        "iterations_convergence": wandb.Image(path),
+                    },
+                    step=self.global_step,
+                )
+            plt.close()
 
     def optimizer_step(self, *args, **kwargs):
         """

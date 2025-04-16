@@ -65,8 +65,15 @@ parser.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RA
                     help='LR decay rate (default: 0.1)')
 parser.add_argument('--lr-k-decay', type=float, default=1.0, metavar='K',
                     help='K decay factor for cosine annealing')
+parser.add_argument('--lr-cycle-limit', type=int, default=1, metavar='N',
+                    help='number of warmup + cooldown epochs before restarting cycle')
+parser.add_argument('--lr-cycle-mul', type=float, default=1.0, metavar='M',
+                    help='cycle multiplier (default: 1.0)')
+parser.add_argument('--lr-cycle-decay', type=float, default=1.0, metavar='M',
+                    help='cycle decay factor (default: 1.0)')
+parser.add_argument('--lr-cycle-steps', type=int, default=0, metavar='N',
+                    help='number of steps to take in each cycle (default: 0)')
 parser.add_argument('--schedule-free', action="store_true", help="Use schedule-free optimizer.")
-
 parser.add_argument(
     "--off-benchmark",
     action="store_false",
@@ -134,6 +141,7 @@ parser.add_argument(
 parser.add_argument("--log-all", action="store_true", help="Log all available metrics.")
 parser.add_argument("--model-summary-depth", default=-1, type=int)
 parser.add_argument("--tags", default=None, type=str, help="Comma separated tags.", )
+parser.add_argument("--log-iterations-conv", action="store_true")
 # Misc
 parser.add_argument("--no-gpu", action="store_true")
 parser.add_argument("--seed", default=9248, type=int)  # 92:48
@@ -174,6 +182,7 @@ parser.add_argument("--drop-path-rate", default=0.0, type=float)
 parser.add_argument("--weight-init", default="", type=str)
 parser.add_argument("--fix-init", action="store_true")
 parser.add_argument("--use-v", action="store_true", help="CatViT use v projection.")
+parser.add_argument("--norm-layer", type=str, default=None)
 # Transit:
 parser.add_argument("--iterations", default=12, type=int)
 parser.add_argument("--n-deq-layers", default=1, type=int)
@@ -210,6 +219,8 @@ parser.add_argument("--svd-k", default=None, type=int)
 parser.add_argument("--teacher-model-path", default=None, type=str)
 parser.add_argument("--expand-tokens", action="store_true")
 parser.add_argument("--expand-token-keep-input", action="store_true")
+parser.add_argument("--expand-weights", action="store_true")
+
 # deq args
 parser.add_argument("--f-solver", default="fixed_point_iter", type=str)
 parser.add_argument("--b-solver", default="fixed_point_iter", type=str)
@@ -241,6 +252,10 @@ parser.add_argument("--balance-loss-coef", default=1e-2, type=float)
 parser.add_argument("--router-z-loss-coef", default=1e-3, type=float)
 # nViT args
 parser.add_argument("--manual-norm-weights", action="store_true")
+# WTViT
+# parser.add_argument("--distil-mode", default="avg", type=str, choices=["avg"])
+parser.add_argument("--weight-tie-cycle", default=0, type=int)
+
 
 args = parser.parse_args()
 

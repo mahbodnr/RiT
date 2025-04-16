@@ -8,94 +8,13 @@ import seaborn as sns
 import argparse
 
 sns.set_style("dark")
-# sns.set_palette("Set2")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 models = {
-    # prenorm
-    # "Transit (12 iters)": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_dqedp_20241126231131.ckpt", # inj
-    # "Transit (12 iters)": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_blhuc_20241128170925.ckpt",
-    # "Transit (6 iters)": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_gxjak_20241202210127.ckpt",
-    # "Transit (18 iters)": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_hxoam_20241202215314.ckpt",
-    
-
-    # " + Injection": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_fcbiw_20241202220836.ckpt",
-    # "NormalizedTransit": r"model_checkpoints/ntransit_tiny_patch16_224_tiny-imagenet_ldhuu_20241202102231.ckpt",
-    # "N + Injection": r"model_checkpoints/ntransit_tiny_patch16_224_tiny-imagenet_cbuns_20241203181929.ckpt",
-    # "Trajectory Loss(TL) 12": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_xvzkd_20241202153317.ckpt",
-    # "TL 12 + Inj": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_moyxr_20241128103358.ckpt",
-    # "TL 10 + Inj": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_becei_20241202170210.ckpt",
-    
-    # "Stochastic Depth ($\sigma=1$)": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_gkvqx_20241201095838.ckpt",
-    # "Stochastic Depth ($\sigma=2$)": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_pyskk_20241201171805.ckpt",
-    # "Stochastic Depth ($\sigma=5$)": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_odeta_20241130111344.ckpt",
-    # "NormalizedTransit": r"model_checkpoints/ntransit_tiny_patch16_224_tiny-imagenet_imvpt_20241128170914.ckpt", #(v1)
-    # "NormalizedTransit": r"model_checkpoints/ntransit_tiny_patch16_224_tiny-imagenet_rawyt_20241128172953.ckpt", #(v2)
-    # "+Injection": r"model_checkpoints/ntransit_tiny_patch16_224_tiny-imagenet_decby_20241129113333.ckpt",
-    
-    # "Gradual TL (GTL) 12": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_rjtvo_20241201095510.ckpt",
-    # "GTL 12 + Inl": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_vadex_20241202154012.ckpt",
-    # "ViT Classifier (VC)": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_ctpvo_20241202112137.ckpt",
-    # "VC TL 12": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_ejccf_20241202113419.ckpt",
-    # "VC GTL 12": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_uoozh_20241202113001.ckpt",
-    # "VC TL 12 + Inj": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_sginz_20241202154712.ckpt",
-    # "VC GTL 12 + Inj": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_nrbjb_20241202154713.ckpt",
-
-    # "VC GTL 6 + Inj": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_cuiwr_20241202223559.ckpt",
-    # "VC GTL 9 + Inj": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_inzor_20241202225640.ckpt",
-    # "VC GTL 18 + Inj": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_ukrmx_20241203000338.ckpt",
-    # "VC GTL 24 + Inj": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_xzkme_20241202221427.ckpt",
-
-    # "Block Inj": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_rjnwk_20241203114246.ckpt",
-    # "Block Inj + VC": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_tjtep_20241203141544.ckpt",
-
-    # " + Trajectory Loss": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_xvzkd_20241202153317.ckpt",
-    # " + Inj": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_faska_20241202154023.ckpt",
-    # " + ViT on Top": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_sginz_20241202154712.ckpt", 
-    # " + Gradual loss": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_nrbjb_20241202154713.ckpt", 
-
-    # "+ Injection ViT": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_rjnwk_20241203114246.ckpt",
-    # "+ Injection on Top": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_tjtep_20241203141544.ckpt",
-    # "Block Inj depth=3, iter=4": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_xrjmg_20241203162618.ckpt",
-    # "phantom grad 12" : r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_yvdqb_20241204135355.ckpt",
-    # "phantom grad 40" : r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_jilfl_20241204142434.ckpt",
-    # "+ Transformer injection": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_rjnwk_20241203114246.ckpt",
-    # "+ Linear + nom injection": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_anckp_20241205111231.ckpt",
-
-    # ImageNet:
-    # "Tiny": r"model_checkpoints/transit_tiny_patch16_224_imagenet_rqxtq_20241207194052.ckpt",
-    # "+ ViT classifier": r"model_checkpoints/transit_tiny_patch16_224_imagenet_wcwgq_20241207195701.ckpt",
-    # "Small": r"model_checkpoints/transit_small_patch16_224_imagenet_iyfse_20241207195701.ckpt",
-    # "Base": r"model_checkpoints/transit_base_patch16_224_imagenet_rugpq_20241211110712.ckpt",
-    #Tiny imagenet: 
-    # "Transit 4x3": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_jyppv_20241219172741.ckpt",
-    # "Transit 12x3": r"model_checkpoints/.ckpt",
-    # "rTransit 4x3": r"model_checkpoints/rtransit_tiny_patch16_224_tiny-imagenet_abcqx_20241218160959.ckpt",
-    # "rTransit 12x3": r"model_checkpoints/rtransit_tiny_patch16_224_tiny-imagenet_zfzum_20241218143507.ckpt",
-    # Imagenet
-    # "12 x 3": r"model_checkpoints/transit_tiny_patch16_224_imagenet_buvxm_20241217155827.ckpt",
-    # "3  x 4": r"model_checkpoints/transit_tiny_patch16_224_imagenet_cubip_20241217152746.ckpt",
-
-    # "2 layers linear": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_cxzee_20241220122634.ckpt",
-    # "2 layers block": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_jyfpa_20241220125035.ckpt",
-    # "3 layers": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_jaxwj_20250106131452.ckpt",
-    # "3 layers no head": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_prjqo_20250106131829.ckpt",
-
-    # No injection
-    # "1 pre layer": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_fwvti_20250109165446.ckpt",
-    # "drop path": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_aptpv_20250109144643.ckpt",
-    # "init values": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_kykyl_20250109110554.ckpt",
-
-    # "inj-2pre-lin": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_kxfyp_20250117130723.ckpt",
-    # "2pre-5e-4": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_sjafa_20250117130743.ckpt",
-    # "2pre-1e-3": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_wdikf_20250117135944.ckpt",
-    # "4pre-1e-3": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_iraeh_20250117140007.ckpt",
-    
-    "svd": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_ycrvy_20250121152004.ckpt",
-    "svd-2-1": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_qrfew_20250121232350.ckpt",
-    "svd-3-0": r"model_checkpoints/transit_tiny_patch16_224_tiny-imagenet_snjto_20250121233149.ckpt",
-
+    # imagenet:
+    "Normal": r"model_checkpoints/transit_tiny_patch16_224_imagenet_qodex_20250401194517.ckpt",
+    "W. Incr. Loss": r"model_checkpoints/transit_tiny_patch16_224_imagenet_vgbny_20250407125740.ckpt",
 }
 
 fig = plt.figure(figsize=(12, 14))

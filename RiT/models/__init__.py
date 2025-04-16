@@ -10,3 +10,4 @@ from .nvit import *
 from .soft_moe import *
 from .deepseek_moe import *
 from .cat_vit import *
+from .weight_tie import *

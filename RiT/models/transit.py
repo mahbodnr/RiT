@@ -37,6 +37,17 @@ from soft_mixture_of_experts.transformer import SoftMoEEncoderLayer
 from .deepseek_moe import getDeepSeekMoEModel
 
 
+class DyT(nn.Module):
+    def __init__(self, num_features, alpha_init_value=0.5):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
+        self.weight = nn.Parameter(torch.ones(num_features))
+        self.bias = nn.Parameter(torch.zeros(num_features))
+    
+    def forward(self, x):
+        x = torch.tanh(self.alpha * x)
+        return x * self.weight + self.bias
+
 class Attention(nn.Module):
     fused_attn: Final[bool]
 
@@ -501,6 +512,12 @@ class Transit(VisionTransformer):
             act_layer: MLP activation layer.
             block_fn: Transformer block layer.
         """
+        if norm_layer is not None and (norm_layer.lower() == "dyt"):
+            use_dyt = True
+            norm_layer =  None
+        else:
+            use_dyt = False
+
         super().__init__(
             img_size=img_size,
             patch_size=patch_size,
@@ -559,7 +576,10 @@ class Transit(VisionTransformer):
         self.stable_skip = stable_skip
         self.expand_tokens = expand_tokens
         self.expand_tokens_keep_input = expand_tokens_keep_input
-        norm_layer = get_norm_layer(norm_layer) or partial(nn.LayerNorm, eps=1e-6)
+        if use_dyt:
+            norm_layer = partial(DyT, alpha_init_value=0.5)
+        else:
+            norm_layer = get_norm_layer(norm_layer) or partial(nn.LayerNorm, eps=1e-6)
         act_layer = get_act_layer(act_layer) or nn.GELU
 
         del self.blocks
@@ -628,7 +648,9 @@ class Transit(VisionTransformer):
         )
 
         self.injection = injection
-        if self.injection == "linear" or inject_input:
+        if self.injection == "input":
+            self.injection_transform = nn.Identity()
+        elif self.injection == "linear" or inject_input:
             self.injection_transform = nn.Linear(embed_dim, embed_dim)
         elif self.injection == "linear_norm":
             self.injection_transform = nn.Sequential(
